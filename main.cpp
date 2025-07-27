@@ -1,10 +1,79 @@
+#include <cstring>
 #include <iostream>
+#include <ranges>
 #include <oneapi/tbb/profiling.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
+
+const xcb_keycode_t KEYCODE_RETURN = 36;
+const xcb_keycode_t KEYCODE_ESCAPE = 9;
+const xcb_keycode_t KEYCODE_Q = 24;
+const xcb_keycode_t KEYCODE_W = 25;
+const xcb_keycode_t KEYCODE_J = 44;
+const xcb_keycode_t KEYCODE_K = 45;
+const xcb_keycode_t KEYCODE_D = 40;
+
+void spawn(const char* command) {
+    if (fork() == 0) {
+        setsid();
+        close(STDIN_FILENO);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+        execlp(command, command, NULL);
+        _exit(127);
+    }
+}
+
+void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
+    if (window_id == XCB_WINDOW_NONE) return;
+    xcb_set_input_focus(conn, XCB_INPUT_FOCUS_POINTER_ROOT, window_id, XCB_CURRENT_TIME);
+    xcb_circulate_window(conn, XCB_CIRCULATE_RAISE_LOWEST, window_id);
+    xcb_flush(conn);
+    // border color to be done later
+
+}
+
+void kill_client(xcb_connection_t* conn, xcb_window_t window_id) {
+    if (window_id == XCB_WINDOW_NONE) return;
+    xcb_intern_atom_cookie_t wm_delete_window_cookie = xcb_intern_atom(conn, 0, strlen("WM_DELETE_WINDOW"), "WM_DELETE_WINDOW");
+    xcb_intern_atom_reply_t* wm_delete_window_reply = xcb_intern_atom_reply(conn, wm_delete_window_cookie, NULL);
+    xcb_intern_atom_cookie_t wm_protocols_cookie = xcb_intern_atom(conn, 0, strlen("WM_PROTOCOLS"), "WM_PROTOCOLS");
+    xcb_intern_atom_reply_t* wm_protocols_reply = xcb_intern_atom_reply(conn, wm_protocols_cookie, NULL);
+    if (wm_delete_window_reply && wm_protocols_reply) {
+        xcb_client_message_event_t event;
+        event.response_type = XCB_CLIENT_MESSAGE;
+        event.format = 32;
+        event.sequence = 0;
+        event.window = window_id;
+        event.type = wm_protocols_reply -> atom;
+        event.data.data32[0] = wm_delete_window_reply -> atom;
+        event.data.data32[1] = XCB_CURRENT_TIME;
+        xcb_send_event(conn, 0, window_id, XCB_EVENT_MASK_NO_EVENT, (const char*)&event);
+        xcb_flush(conn);
+    }
+    else {
+        std::cerr << "Could not send WM_DELETE_WINDOW, forcefully killing client." << std::endl;
+        xcb_kill_client(conn, window_id);
+        xcb_flush(conn);
+    }
+    free(wm_delete_window_reply);
+    free(wm_protocols_reply);
+}
+
+void ungrab_key_with_mods(xcb_connection_t* conn, xcb_window_t root, xcb_keycode_t keycode, uint16_t modifiers) {
+    uint16_t num_lock_mask = XCB_MOD_MASK_2;
+    uint16_t caps_lock_mask = XCB_MOD_MASK_LOCK;
+    xcb_ungrab_key(conn, keycode, modifiers, root);
+    xcb_ungrab_key(conn, keycode, modifiers | caps_lock_mask, root);
+    xcb_ungrab_key(conn, keycode, modifiers | num_lock_mask, root);
+    xcb_ungrab_key(conn, keycode, modifiers | num_lock_mask | caps_lock_mask, root);
+}
+
+
 int main() {
     xcb_connection_t* connection;
     xcb_screen_t* screen;
+    xcb_generic_event_t* event = nullptr;
     connection = xcb_connect(NULL, NULL);
     if (xcb_connection_has_error(connection)) {
         std::cerr << "Failed to connect to X server" << std::endl;
@@ -15,22 +84,72 @@ int main() {
     screen = xcb_setup_roots_iterator(setup).data;
     if ( screen ) {
         std::cout << screen->width_in_pixels << "x" << screen->height_in_pixels << std::endl;
-        uint32_t mask = XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+        uint32_t mask;
+        mask = XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
+               XCB_EVENT_MASK_STRUCTURE_NOTIFY |
+               XCB_EVENT_MASK_KEY_PRESS |
+               XCB_EVENT_MASK_FOCUS_CHANGE;
         xcb_change_window_attributes(connection, screen->root, XCB_CW_EVENT_MASK, &mask);
+        xcb_generic_error_t *error = xcb_request_check(connection, xcb_change_window_attributes_checked(connection, screen->root, XCB_CW_EVENT_MASK, &mask));
+        if (error) {
+            std::cerr << "Error setting event mask (another WM likely running): " << "Error code " << (int)error-> error_code << ", Minor code " << (int)error->minor_code << std::endl;
+            free(error);
+            xcb_disconnect(connection);
+            return 1;
+        }
+        uint16_t modmask_super = XCB_MOD_MASK_4;
+        uint16_t num_lock_mask = XCB_MOD_MASK_2;
+        uint16_t caps_lock_mask = XCB_MOD_MASK_LOCK;
+
+        auto grab_key_with_mods = [&](xcb_keycode_t keycode, uint16_t modifiers) {
+            xcb_grab_key(connection, 1, screen->root, modifiers, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+            xcb_grab_key(connection, 1, screen->root, modifiers | num_lock_mask, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+            xcb_grab_key(connection, 1, screen->root, modifiers | caps_lock_mask, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+            xcb_grab_key(connection, 1, screen->root, modifiers | num_lock_mask, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+        };
+
+        grab_key_with_mods(KEYCODE_RETURN, modmask_super);
+        grab_key_with_mods(KEYCODE_ESCAPE, modmask_super);
+        grab_key_with_mods(KEYCODE_Q, modmask_super);
+        grab_key_with_mods(KEYCODE_W, modmask_super);
+        grab_key_with_mods(KEYCODE_J, modmask_super);
+        grab_key_with_mods(KEYCODE_K, modmask_super);
+        grab_key_with_mods(KEYCODE_D, modmask_super);
         xcb_flush(connection);
-        xcb_generic_event_t* event;
+        // xcb_generic_event_t* event;
         while ((event = xcb_wait_for_event(connection))) {
             switch ( event -> response_type & ~0x80 ) {
                 case XCB_MAP_REQUEST: {
                     xcb_map_request_event_t* mr = (xcb_map_request_event_t*)event;
+                    uint32_t values[4];
+                    uint16_t mask_config = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
+                    values[0] = 0;
+                    values[1] = 0;
+                    values[2] = screen->width_in_pixels;
+                    values[3] = screen->height_in_pixels;
+                    xcb_configure_window(connection, mr->window, mask_config, values);
                     xcb_map_window(connection, mr->window);
+
+                    xcb_configure_notify_event_t configure_notify_event;
+                    configure_notify_event.response_type = XCB_CONFIGURE_NOTIFY;
+                    configure_notify_event.event = mr->window;
+                    configure_notify_event.window = mr->window;
+                    configure_notify_event.x = values[0];
+                    configure_notify_event.y = values[1];
+                    configure_notify_event.width = values[2];
+                    configure_notify_event.height = values[3];
+                    configure_notify_event.border_width = 0;
+                    configure_notify_event.above_sibling = XCB_WINDOW_NONE;
+                    configure_notify_event.override_redirect = false;
+                    xcb_send_event(connection, 0, mr->window, XCB_EVENT_MASK_STRUCTURE_NOTIFY, (const char*)&configure_notify_event);
                     xcb_flush(connection);
+                    focus_client(connection, mr->window);
                     break;
                 }
                 case XCB_CONFIGURE_REQUEST: {
                     xcb_configure_request_event_t* cr = (xcb_configure_request_event_t*)event;
                     std::cout << "ConfigureRequest received for window: " << cr->window << std::endl;
-                    uint32_t values[7];
+                    uint32_t values[4];
                     uint16_t mask_config = 0;
                     mask_config |= XCB_CONFIG_WINDOW_X;
                     values[0] = 0;
@@ -41,6 +160,20 @@ int main() {
                     mask_config |= XCB_CONFIG_WINDOW_HEIGHT;
                     values[3] = screen->height_in_pixels;
                     xcb_configure_window(connection, cr->window, mask_config, values);
+
+                    xcb_configure_notify_event_t configure_notify_event;
+                    configure_notify_event.response_type = XCB_CONFIGURE_NOTIFY;
+                    configure_notify_event.event = cr->window;
+                    configure_notify_event.window = cr->window;
+                    configure_notify_event.x = values[0];
+                    configure_notify_event.y = values[1];
+                    configure_notify_event.width = values[2];
+                    configure_notify_event.height = values[3];
+                    configure_notify_event.border_width = 0;
+                    configure_notify_event.above_sibling = XCB_WINDOW_NONE;
+                    configure_notify_event.override_redirect = false;
+                    xcb_send_event(connection, 0, cr->window, XCB_EVENT_MASK_STRUCTURE_NOTIFY, (const char*)&configure_notify_event);
+
                     xcb_flush(connection);
                     break;
                 }
@@ -49,14 +182,61 @@ int main() {
                     std::cout << "Window destroyed" << dn->window << std::endl;
                     break;
                 }
+                case XCB_KEY_PRESS: {
+                    xcb_key_press_event_t* kp = (xcb_key_press_event_t*)event;
+                    std::cout << "Key Press event: Keycode = " << (int)kp->detail << ", State (Modifiers) = " << (int)kp->state << std::endl;
+                    uint16_t current_modmask = kp->state & (modmask_super | num_lock_mask | caps_lock_mask);
+                    if ((kp->detail == KEYCODE_RETURN) && (current_modmask & modmask_super)) {
+                        std::cout << "Super+Return detected, launching st." << std::endl;
+                        spawn("st");
+                    }
+                    else if ((kp->detail == KEYCODE_ESCAPE) && (current_modmask & modmask_super)) {
+                        std::cout << "Super+Escape detected, quitting WM." << std::endl;
+                        ungrab_key_with_mods(connection, screen->root, KEYCODE_RETURN, modmask_super);
+                        ungrab_key_with_mods(connection, screen->root, KEYCODE_ESCAPE, modmask_super);
+                        ungrab_key_with_mods(connection, screen->root, KEYCODE_D, modmask_super);
+                        ungrab_key_with_mods(connection, screen->root, KEYCODE_Q, modmask_super);
+                        ungrab_key_with_mods(connection, screen->root, KEYCODE_W, modmask_super);
+                        ungrab_key_with_mods(connection, screen->root, KEYCODE_J, modmask_super);
+                        ungrab_key_with_mods(connection, screen->root, KEYCODE_K, modmask_super);
+                        uint32_t reset_mask = 0;
+                        xcb_change_window_attributes(connection, screen->root, XCB_CW_EVENT_MASK, &reset_mask);
+                        xcb_flush(connection);
+                        free(event);
+                        goto end_loop;
+                    }
+                    else if ((kp->detail == KEYCODE_Q) && (current_modmask & modmask_super)) {
+                        if ( kp->event != XCB_WINDOW_NONE && kp-> event != screen->root ) {
+                            kill_client(connection, kp->event);
+                        }
+                    }
+                    else if ((kp->detail == KEYCODE_J) && (current_modmask & modmask_super)) {
+                        // to be done
+                    }
+                    else if ((kp->detail == KEYCODE_K) && (current_modmask & modmask_super)) {
+                        // to be done
+                    }
+                    break;
+                }
+                case XCB_FOCUS_IN: {
+                    xcb_focus_in_event_t* fi = (xcb_focus_in_event_t*)event;
+                    if (fi->event != screen->root) {
+                        std::cout << "Focuse changed to window: " << fi->event << std::endl;
+                    }
+                    break;
+                }
                 default: {
                     std::cout << "Unknown event type" << std::endl;
                     break;
                 }
-            }}
-        free(event);
+            }
+            free(event);
+            event = nullptr;
+        }
+        end_loop:
     }
     xcb_disconnect(connection);
 
     return 0;
 }
+
