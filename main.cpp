@@ -12,6 +12,7 @@ const xcb_keycode_t KEYCODE_W = 25;
 const xcb_keycode_t KEYCODE_J = 44;
 const xcb_keycode_t KEYCODE_K = 45;
 const xcb_keycode_t KEYCODE_D = 40;
+xcb_window_t focused_client_window = XCB_WINDOW_NONE;
 
 void spawn(const char* command) {
     if (fork() == 0) {
@@ -25,7 +26,9 @@ void spawn(const char* command) {
 }
 
 void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
+    std::cout << "Focusing client " << window_id << std::endl;
     if (window_id == XCB_WINDOW_NONE) return;
+    focused_client_window = window_id;
     xcb_set_input_focus(conn, XCB_INPUT_FOCUS_POINTER_ROOT, window_id, XCB_CURRENT_TIME);
     xcb_circulate_window(conn, XCB_CIRCULATE_RAISE_LOWEST, window_id);
     xcb_flush(conn);
@@ -34,7 +37,11 @@ void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
 }
 
 void kill_client(xcb_connection_t* conn, xcb_window_t window_id) {
-    if (window_id == XCB_WINDOW_NONE) return;
+    if (window_id == XCB_WINDOW_NONE) {
+        std::cerr << "kill_client called with XCB_WINDOW_NONE. Aborting." << std::endl;
+        return;
+    }
+    std::cout << "Attempting to kill " << window_id << std::endl;
     xcb_intern_atom_cookie_t wm_delete_window_cookie = xcb_intern_atom(conn, 0, strlen("WM_DELETE_WINDOW"), "WM_DELETE_WINDOW");
     xcb_intern_atom_reply_t* wm_delete_window_reply = xcb_intern_atom_reply(conn, wm_delete_window_cookie, nullptr);
     xcb_intern_atom_cookie_t wm_protocols_cookie = xcb_intern_atom(conn, 0, strlen("WM_PROTOCOLS"), "WM_PROTOCOLS");
@@ -74,6 +81,7 @@ int main() {
     xcb_connection_t* connection;
     xcb_screen_t* screen;
     xcb_generic_event_t* event = nullptr;
+    //xcb_window_t focused_client_window = XCB_WINDOW_NONE;
     connection = xcb_connect(nullptr, nullptr);
     if (xcb_connection_has_error(connection)) {
         std::cerr << "Failed to connect to X server" << std::endl;
@@ -88,7 +96,8 @@ int main() {
         mask = XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
                XCB_EVENT_MASK_STRUCTURE_NOTIFY |
                XCB_EVENT_MASK_KEY_PRESS |
-               XCB_EVENT_MASK_FOCUS_CHANGE;
+               XCB_EVENT_MASK_FOCUS_CHANGE |
+                   XCB_EVENT_MASK_FOCUS_CHANGE;
         xcb_change_window_attributes(connection, screen->root, XCB_CW_EVENT_MASK, &mask);
         xcb_generic_error_t *error = xcb_request_check(connection, xcb_change_window_attributes_checked(connection, screen->root, XCB_CW_EVENT_MASK, &mask));
         if (error) {
@@ -130,6 +139,9 @@ int main() {
                     xcb_configure_window(connection, mr->window, mask_config, values);
                     xcb_map_window(connection, mr->window);
 
+                    uint32_t client_mask = XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+                    xcb_change_window_attributes(connection, mr->window, XCB_CW_EVENT_MASK, &client_mask);
+
                     xcb_configure_notify_event_t configure_notify_event;
                     configure_notify_event.response_type = XCB_CONFIGURE_NOTIFY;
                     configure_notify_event.event = mr->window;
@@ -144,6 +156,7 @@ int main() {
                     xcb_send_event(connection, 0, mr->window, XCB_EVENT_MASK_STRUCTURE_NOTIFY, (const char*)&configure_notify_event);
                     xcb_flush(connection);
                     focus_client(connection, mr->window);
+                    focused_client_window = mr->window;
                     break;
                 }
                 case XCB_CONFIGURE_REQUEST: {
@@ -180,6 +193,9 @@ int main() {
                 case XCB_DESTROY_NOTIFY: {
                     auto* dn = (xcb_destroy_notify_event_t*)event;
                     std::cout << "Window destroyed" << dn->window << std::endl;
+                    if ( focused_client_window == dn->window ) {
+                        focused_client_window = XCB_WINDOW_NONE;
+                    }
                     break;
                 }
                 case XCB_KEY_PRESS: {
@@ -206,8 +222,15 @@ int main() {
                         goto end_loop;
                     }
                     else if ((kp->detail == KEYCODE_Q) && (current_modmask & modmask_super)) {
-                        if ( kp->event != XCB_WINDOW_NONE && kp-> event != screen->root ) {
-                            kill_client(connection, kp->event);
+                        std::cout << "Super+Q pressed. Checking focused_client_window..." << std::endl;
+                        std::cout << "  Current focused_client_window: " << focused_client_window << std::endl;
+                        std::cout << "  Screen root window: " << screen->root << std::endl;
+                        if (focused_client_window != XCB_WINDOW_NONE && focused_client_window != screen->root) {
+                            std::cout << "  Focused client window is valid. Attempting to kill: " << focused_client_window << std::endl;
+                            kill_client(connection, focused_client_window);
+                        }
+                        else {
+                            std::cout << "No valid client window focused to kill" << std::endl;
                         }
                     }
                     else if ((kp->detail == KEYCODE_J) && (current_modmask & modmask_super)) {
@@ -219,9 +242,14 @@ int main() {
                     break;
                 }
                 case XCB_FOCUS_IN: {
-                    auto* fi = (xcb_focus_in_event_t*)event;
-                    if (fi->event != screen->root) {
-                        std::cout << "Focuse changed to window: " << fi->event << std::endl;
+                    xcb_focus_in_event_t* fi = reinterpret_cast<xcb_focus_in_event_t *>(event);
+                    if (fi->event != screen->root && fi->event != XCB_WINDOW_NONE) {
+                        std::cout << "Focus changed to window: " << fi->event << std::endl;
+                        focused_client_window = fi->event;
+                    }
+                    else {
+                        std::cout << "No focused client window found" << std::endl;
+                        //focused_client_window = XCB_WINDOW_NONE; fuck this shit
                     }
                     break;
                 }
