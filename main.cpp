@@ -36,9 +36,9 @@ void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
 void kill_client(xcb_connection_t* conn, xcb_window_t window_id) {
     if (window_id == XCB_WINDOW_NONE) return;
     xcb_intern_atom_cookie_t wm_delete_window_cookie = xcb_intern_atom(conn, 0, strlen("WM_DELETE_WINDOW"), "WM_DELETE_WINDOW");
-    xcb_intern_atom_reply_t* wm_delete_window_reply = xcb_intern_atom_reply(conn, wm_delete_window_cookie, NULL);
+    xcb_intern_atom_reply_t* wm_delete_window_reply = xcb_intern_atom_reply(conn, wm_delete_window_cookie, nullptr);
     xcb_intern_atom_cookie_t wm_protocols_cookie = xcb_intern_atom(conn, 0, strlen("WM_PROTOCOLS"), "WM_PROTOCOLS");
-    xcb_intern_atom_reply_t* wm_protocols_reply = xcb_intern_atom_reply(conn, wm_protocols_cookie, NULL);
+    xcb_intern_atom_reply_t* wm_protocols_reply = xcb_intern_atom_reply(conn, wm_protocols_cookie, nullptr);
     if (wm_delete_window_reply && wm_protocols_reply) {
         xcb_client_message_event_t event;
         event.response_type = XCB_CLIENT_MESSAGE;
@@ -74,7 +74,7 @@ int main() {
     xcb_connection_t* connection;
     xcb_screen_t* screen;
     xcb_generic_event_t* event = nullptr;
-    connection = xcb_connect(NULL, NULL);
+    connection = xcb_connect(nullptr, nullptr);
     if (xcb_connection_has_error(connection)) {
         std::cerr << "Failed to connect to X server" << std::endl;
         return 1;
@@ -120,7 +120,7 @@ int main() {
         while ((event = xcb_wait_for_event(connection))) {
             switch ( event -> response_type & ~0x80 ) {
                 case XCB_MAP_REQUEST: {
-                    xcb_map_request_event_t* mr = (xcb_map_request_event_t*)event;
+                    auto* mr = (xcb_map_request_event_t*)event;
                     uint32_t values[4];
                     uint16_t mask_config = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
                     values[0] = 0;
@@ -147,7 +147,7 @@ int main() {
                     break;
                 }
                 case XCB_CONFIGURE_REQUEST: {
-                    xcb_configure_request_event_t* cr = (xcb_configure_request_event_t*)event;
+                    auto* cr = (xcb_configure_request_event_t*)event;
                     std::cout << "ConfigureRequest received for window: " << cr->window << std::endl;
                     uint32_t values[4];
                     uint16_t mask_config = 0;
@@ -178,12 +178,12 @@ int main() {
                     break;
                 }
                 case XCB_DESTROY_NOTIFY: {
-                    xcb_destroy_notify_event_t* dn = (xcb_destroy_notify_event_t*)event;
+                    auto* dn = (xcb_destroy_notify_event_t*)event;
                     std::cout << "Window destroyed" << dn->window << std::endl;
                     break;
                 }
                 case XCB_KEY_PRESS: {
-                    xcb_key_press_event_t* kp = (xcb_key_press_event_t*)event;
+                    auto* kp = (xcb_key_press_event_t*)event;
                     std::cout << "Key Press event: Keycode = " << (int)kp->detail << ", State (Modifiers) = " << (int)kp->state << std::endl;
                     uint16_t current_modmask = kp->state & (modmask_super | num_lock_mask | caps_lock_mask);
                     if ((kp->detail == KEYCODE_RETURN) && (current_modmask & modmask_super)) {
@@ -219,7 +219,7 @@ int main() {
                     break;
                 }
                 case XCB_FOCUS_IN: {
-                    xcb_focus_in_event_t* fi = (xcb_focus_in_event_t*)event;
+                    auto* fi = (xcb_focus_in_event_t*)event;
                     if (fi->event != screen->root) {
                         std::cout << "Focuse changed to window: " << fi->event << std::endl;
                     }
