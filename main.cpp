@@ -1,18 +1,24 @@
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <ranges>
+#include <vector>
 #include <oneapi/tbb/profiling.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
 
-const xcb_keycode_t KEYCODE_RETURN = 36;
-const xcb_keycode_t KEYCODE_ESCAPE = 9;
-const xcb_keycode_t KEYCODE_Q = 24;
-const xcb_keycode_t KEYCODE_W = 25;
-const xcb_keycode_t KEYCODE_J = 44;
-const xcb_keycode_t KEYCODE_K = 45;
-const xcb_keycode_t KEYCODE_D = 40;
+constexpr xcb_keycode_t KEYCODE_RETURN = 36;
+constexpr xcb_keycode_t KEYCODE_ESCAPE = 9;
+constexpr xcb_keycode_t KEYCODE_Q = 24;
+constexpr xcb_keycode_t KEYCODE_W = 25;
+constexpr xcb_keycode_t KEYCODE_J = 44;
+constexpr xcb_keycode_t KEYCODE_K = 45;
+constexpr xcb_keycode_t KEYCODE_D = 40;
 xcb_window_t focused_client_window = XCB_WINDOW_NONE;
+std::vector<xcb_window_t> client_windows;
+uint32_t focused_border;
+uint32_t unfocused_border;
+
 
 void spawn(const char* command) {
     if (fork() == 0) {
@@ -26,6 +32,12 @@ void spawn(const char* command) {
 }
 
 void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
+    static xcb_window_t last_focused = XCB_WINDOW_NONE;
+    if (last_focused != XCB_WINDOW_NONE && last_focused != window_id) {
+        xcb_change_window_attributes(conn, last_focused, XCB_CW_BORDER_PIXEL, &unfocused_border);
+    }
+    xcb_change_window_attributes(conn, window_id, XCB_CW_BORDER_PIXEL, &focused_border);
+    last_focused = window_id;
     std::cout << "Focusing client " << window_id << std::endl;
     if (window_id == XCB_WINDOW_NONE) return;
     focused_client_window = window_id;
@@ -76,6 +88,32 @@ void ungrab_key_with_mods(xcb_connection_t* conn, xcb_window_t root, xcb_keycode
     xcb_ungrab_key(conn, keycode, modifiers | num_lock_mask | caps_lock_mask, root);
 }
 
+uint32_t get_color_pixel(xcb_connection_t* conn, xcb_screen_t* screen, uint16_t red, uint16_t green, uint16_t blue) {
+    xcb_alloc_color_cookie_t color_cookie = xcb_alloc_color(conn, screen->default_colormap, red, green, blue);
+    xcb_alloc_color_reply_t* color_reply = xcb_alloc_color_reply(conn, color_cookie, NULL);
+    if (!color_reply) return screen->black_pixel;
+    uint32_t pixel = color_reply->pixel;
+    free(color_reply);
+    return pixel;
+}
+
+void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
+    xcb_window_t master = client_windows.empty() ? XCB_WINDOW_NONE : client_windows[0];
+    int master_width = screen->width_in_pixels * 0.6;
+    int stack_width = screen->width_in_pixels - master_width;
+    int stack_count = client_windows.size();
+    uint32_t master_geom[4] = {0, 0, master_width, screen->height_in_pixels};
+    xcb_configure_window(connection, master,
+    XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+    master_geom);
+    for (size_t i = 1; i < client_windows.size(); ++i) {
+        int stack_height = screen->height_in_pixels / stack_count;
+        uint32_t stack_geom[4] = {master_width, (int)((i-1) * stack_height), stack_width, stack_height};
+        xcb_configure_window(connection, client_windows[i],
+            XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+            stack_geom);
+    }
+}
 
 int main() {
     xcb_connection_t* connection;
@@ -90,6 +128,8 @@ int main() {
     std::cout << "Connected to X server" << std::endl;
     const xcb_setup_t* setup = xcb_get_setup(connection);
     screen = xcb_setup_roots_iterator(setup).data;
+    focused_border = get_color_pixel(connection, screen, 65535, 42405, 0);
+    unfocused_border = get_color_pixel(connection, screen, 30000, 30000, 30000);
     if ( screen ) {
         std::cout << screen->width_in_pixels << "x" << screen->height_in_pixels << std::endl;
         uint32_t mask;
@@ -137,10 +177,15 @@ int main() {
                     values[2] = screen->width_in_pixels;
                     values[3] = screen->height_in_pixels;
                     xcb_configure_window(connection, mr->window, mask_config, values);
-                    xcb_map_window(connection, mr->window);
+                    uint32_t border_width = 2;
+                    xcb_configure_window(connection, mr->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &border_width);
 
                     uint32_t client_mask = XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
                     xcb_change_window_attributes(connection, mr->window, XCB_CW_EVENT_MASK, &client_mask);
+
+                    xcb_map_window(connection, mr->window);
+                    uint32_t unfocused_border = get_color_pixel(connection, screen, 30000, 30000, 30000);
+                    xcb_change_window_attributes(connection, mr->window, XCB_CW_BORDER_PIXEL, &unfocused_border);
 
                     xcb_configure_notify_event_t configure_notify_event;
                     configure_notify_event.response_type = XCB_CONFIGURE_NOTIFY;
@@ -155,6 +200,8 @@ int main() {
                     configure_notify_event.override_redirect = false;
                     xcb_send_event(connection, 0, mr->window, XCB_EVENT_MASK_STRUCTURE_NOTIFY, (const char*)&configure_notify_event);
                     xcb_flush(connection);
+                    client_windows.push_back(mr->window);
+                    apply_master_stack(connection, screen);
                     focus_client(connection, mr->window);
                     focused_client_window = mr->window;
                     break;
@@ -196,6 +243,10 @@ int main() {
                     if ( focused_client_window == dn->window ) {
                         focused_client_window = XCB_WINDOW_NONE;
                     }
+                    client_windows.erase(
+                        std::remove(client_windows.begin(), client_windows.end(), dn->window),
+                        client_windows.end());
+                    apply_master_stack(connection, screen);
                     break;
                 }
                 case XCB_KEY_PRESS: {
