@@ -206,6 +206,10 @@ int main() {
                         std::cout << "Super+Return detected, launching st." << std::endl;
                         spawn("st");
                     }
+                    else if ((kp->detail) == KEYCODE_D && (current_modmask & modmask_super)) {
+                        std::cout << "Super+D detected, launching dmenu." << std::endl;
+                        spawn("dmenu_run");
+                    }
                     else if ((kp->detail == KEYCODE_ESCAPE) && (current_modmask & modmask_super)) {
                         std::cout << "Super+Escape detected, quitting WM." << std::endl;
                         ungrab_key_with_mods(connection, screen->root, KEYCODE_RETURN, modmask_super);
