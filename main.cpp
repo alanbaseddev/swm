@@ -113,6 +113,10 @@ void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
             stack_geom);
     }
+    for (size_t i = 0; i < client_windows.size(); ++i) {
+        uint32_t color = (i==0) ? focused_border : unfocused_border;
+        xcb_change_window_attributes(connection, client_windows[i], XCB_CW_BORDER_PIXEL, &color);
+    }
 }
 
 int main() {
@@ -136,7 +140,6 @@ int main() {
         mask = XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
                XCB_EVENT_MASK_STRUCTURE_NOTIFY |
                XCB_EVENT_MASK_KEY_PRESS |
-               XCB_EVENT_MASK_FOCUS_CHANGE |
                    XCB_EVENT_MASK_FOCUS_CHANGE;
         xcb_change_window_attributes(connection, screen->root, XCB_CW_EVENT_MASK, &mask);
         xcb_generic_error_t *error = xcb_request_check(connection, xcb_change_window_attributes_checked(connection, screen->root, XCB_CW_EVENT_MASK, &mask));
@@ -154,7 +157,7 @@ int main() {
             xcb_grab_key(connection, 1, screen->root, modifiers, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
             xcb_grab_key(connection, 1, screen->root, modifiers | num_lock_mask, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
             xcb_grab_key(connection, 1, screen->root, modifiers | caps_lock_mask, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-            xcb_grab_key(connection, 1, screen->root, modifiers | num_lock_mask, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+            xcb_grab_key(connection, 1, screen->root, modifiers | num_lock_mask | caps_lock_mask, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
         };
 
         grab_key_with_mods(KEYCODE_RETURN, modmask_super);
@@ -298,13 +301,26 @@ int main() {
                 }
                 case XCB_FOCUS_IN: {
                     xcb_focus_in_event_t* fi = reinterpret_cast<xcb_focus_in_event_t *>(event);
+                    std::cout << "\n--- FOCUS_IN Event Received ---" << std::endl;
+                    std::cout << "  Event Window (fi->event): " << fi->event << std::endl;
+                    std::cout << "  Detail (how focus changed): " << (int)fi->detail << std::endl;
+                    std::cout << "  Screen root window: " << screen->root << std::endl;
+
                     if (fi->event != screen->root && fi->event != XCB_WINDOW_NONE) {
                         std::cout << "Focus changed to window: " << fi->event << std::endl;
-                        focused_client_window = fi->event;
+                        //focused_client_window = fi->event;
+                        focus_client(connection, fi->event);
                     }
                     else {
                         std::cout << "No focused client window found" << std::endl;
-                        //focused_client_window = XCB_WINDOW_NONE; fuck this shit
+                        focused_client_window = XCB_WINDOW_NONE;
+                        if (!client_windows.empty()) {
+                            xcb_window_t window_to_refocus = client_windows.back();
+                            std::cout << "Focused client window: " << window_to_refocus << std::endl;
+                            focus_client(connection, window_to_refocus);
+                        } else {
+                            std::cout << "No focused client window found" << std::endl;
+                        }
                     }
                     break;
                 }
