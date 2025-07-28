@@ -33,7 +33,10 @@ void spawn(const char* command) {
 
 void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
     static xcb_window_t last_focused = XCB_WINDOW_NONE;
+    std::cout << "\n--- Calling focus_client for window: " << window_id << " ---" << std::endl;
+    std::cout << "  Current last_focused (before update): " << last_focused << std::endl;
     if (last_focused != XCB_WINDOW_NONE && last_focused != window_id) {
+        std::cout << "  Changing border of previous focused window " << last_focused << " to unfocused color." << std::endl;
         xcb_change_window_attributes(conn, last_focused, XCB_CW_BORDER_PIXEL, &unfocused_border);
     }
     xcb_change_window_attributes(conn, window_id, XCB_CW_BORDER_PIXEL, &focused_border);
@@ -44,7 +47,6 @@ void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
     xcb_set_input_focus(conn, XCB_INPUT_FOCUS_POINTER_ROOT, window_id, XCB_CURRENT_TIME);
     xcb_circulate_window(conn, XCB_CIRCULATE_RAISE_LOWEST, window_id);
     xcb_flush(conn);
-    // border color to be done later
 
 }
 
@@ -112,10 +114,6 @@ void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
         xcb_configure_window(connection, client_windows[i],
             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
             stack_geom);
-    }
-    for (size_t i = 0; i < client_windows.size(); ++i) {
-        uint32_t color = (i==0) ? focused_border : unfocused_border;
-        xcb_change_window_attributes(connection, client_windows[i], XCB_CW_BORDER_PIXEL, &color);
     }
 }
 
