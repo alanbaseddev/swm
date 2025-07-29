@@ -14,6 +14,9 @@ constexpr xcb_keycode_t KEYCODE_W = 25;
 constexpr xcb_keycode_t KEYCODE_J = 44;
 constexpr xcb_keycode_t KEYCODE_K = 45;
 constexpr xcb_keycode_t KEYCODE_D = 40;
+constexpr xcb_keycode_t KEYCODE_PLUS = 21;
+constexpr xcb_keycode_t KEYCODE_MINUS = 20;
+int gap_size = 20;
 
 xcb_window_t focused_client_window = XCB_WINDOW_NONE;
 std::vector<xcb_window_t> client_windows;
@@ -112,19 +115,43 @@ uint32_t get_color_pixel(xcb_connection_t* conn, xcb_screen_t* screen, uint16_t 
 void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
     if (client_windows.empty()) return;
 
+    if (client_windows.size() == 1) {
+        uint32_t fullscreen_geom[4] = {
+            gap_size, // x
+            gap_size, // y
+            (uint32_t)(screen->width_in_pixels - 2 * gap_size),
+            (uint32_t)(screen->height_in_pixels - 2 * gap_size)
+        };
+        xcb_configure_window(connection, client_windows[0], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, fullscreen_geom);
+        xcb_flush(connection);
+        return;
+    }
     xcb_window_t master = client_windows[0];
-    int master_width = screen->width_in_pixels * 0.6;
-    int stack_width = screen->width_in_pixels - master_width;
+    int usable_width = screen->width_in_pixels - 2 * gap_size;
+    int usable_height = screen->height_in_pixels - 2 * gap_size;
+    int master_width = (usable_width * 0.6) - (gap_size / 2);
+    int stack_width = usable_width - master_width - gap_size;
     int stack_count = client_windows.size() - 1;
 
-    uint32_t master_geom[4] = {0, 0, (uint32_t)master_width, (uint32_t)screen->height_in_pixels};
+    uint32_t master_geom[4] = {
+        gap_size,
+        gap_size,
+        (uint32_t)master_width,
+        (uint32_t)usable_height
+    };
     xcb_configure_window(connection, master,
         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
         master_geom);
 
     for (size_t i = 1; i < client_windows.size(); ++i) {
-        int stack_height = stack_count > 0 ? screen->height_in_pixels / stack_count : screen->height_in_pixels;
-        uint32_t stack_geom[4] = {(uint32_t)master_width, (uint32_t)((i-1) * stack_height), (uint32_t)stack_width, (uint32_t)stack_height};
+        int stack_height_per_window = (usable_height - (stack_count - 1) * gap_size) / stack_count;
+        int stack_y = gap_size + (i-1) * (stack_height_per_window + gap_size);
+        uint32_t stack_geom[4] = {
+            gap_size + master_width + gap_size,
+            (uint32_t)stack_y,
+            (uint32_t)stack_width,
+            (uint32_t)stack_height_per_window
+        };
         xcb_configure_window(connection, client_windows[i],
             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
             stack_geom);
@@ -185,6 +212,8 @@ int main() {
         grab_key_with_mods(KEYCODE_J, modmask_super);
         grab_key_with_mods(KEYCODE_K, modmask_super);
         grab_key_with_mods(KEYCODE_D, modmask_super);
+        grab_key_with_mods(KEYCODE_PLUS, modmask_super);
+        grab_key_with_mods(KEYCODE_MINUS, modmask_super);
         xcb_flush(connection);
 
         while ((event = xcb_wait_for_event(connection))) {
@@ -329,6 +358,14 @@ int main() {
                     }
                     else if ((kp->detail == KEYCODE_K) && (current_modmask & modmask_super)) {
                         // to be done
+                    }
+                    else if ((kp->detail == KEYCODE_PLUS) && (current_modmask & modmask_super)) {
+                        gap_size += 2;
+                        apply_master_stack(connection, screen);
+                    }
+                    else if ((kp->detail == KEYCODE_MINUS) && (current_modmask & modmask_super)) {
+                        gap_size -= 2;
+                        apply_master_stack(connection, screen);
                     }
                     break;
                 }
