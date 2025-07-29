@@ -23,8 +23,6 @@ std::vector<xcb_window_t> client_windows;
 uint32_t focused_border;
 uint32_t unfocused_border;
 
-bool ignore_enter_events = false;
-auto last_focus_change = std::chrono::steady_clock::now();
 
 void spawn(const char* command) {
     if (fork() == 0) {
@@ -41,8 +39,6 @@ void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
     static xcb_window_t last_focused = XCB_WINDOW_NONE;
     if (focused_client_window == window_id) return;
 
-    ignore_enter_events = true;
-    last_focus_change = std::chrono::steady_clock::now();
 
     if (last_focused != XCB_WINDOW_NONE && last_focused != window_id) {
         std::cout << "  Changing border of previous focused window " << last_focused << " to unfocused color." << std::endl;
@@ -183,7 +179,8 @@ int main() {
                XCB_EVENT_MASK_STRUCTURE_NOTIFY |
                XCB_EVENT_MASK_KEY_PRESS |
                XCB_EVENT_MASK_FOCUS_CHANGE |
-               XCB_EVENT_MASK_ENTER_WINDOW;
+               XCB_EVENT_MASK_BUTTON_PRESS |
+               XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
 
         xcb_change_window_attributes(connection, screen->root, XCB_CW_EVENT_MASK, &mask);
         xcb_generic_error_t *error = xcb_request_check(connection, xcb_change_window_attributes_checked(connection, screen->root, XCB_CW_EVENT_MASK, &mask));
@@ -217,11 +214,7 @@ int main() {
         xcb_flush(connection);
 
         while ((event = xcb_wait_for_event(connection))) {
-            auto now = std::chrono::steady_clock::now();
-            if (ignore_enter_events &&
-                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_focus_change).count() > 30) {
-                ignore_enter_events = false;
-            }
+
 
             switch (event->response_type & ~0x80) {
                 case XCB_MAP_REQUEST: {
@@ -237,8 +230,17 @@ int main() {
                     uint32_t border_width = 2;
                     xcb_configure_window(connection, mr->window, XCB_CONFIG_WINDOW_BORDER_WIDTH, &border_width);
 
-                    uint32_t client_mask = XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_ENTER_WINDOW;
+                    uint32_t client_mask = XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
                     xcb_change_window_attributes(connection, mr->window, XCB_CW_EVENT_MASK, &client_mask);
+
+                    xcb_grab_button(connection, 0, mr->window,
+                        XCB_EVENT_MASK_BUTTON_PRESS,
+                        XCB_GRAB_MODE_SYNC,
+                        XCB_GRAB_MODE_ASYNC,
+                        XCB_WINDOW_NONE,
+                        XCB_CURSOR_NONE,
+                        XCB_BUTTON_INDEX_1,
+                        XCB_MOD_MASK_ANY);
 
                     xcb_map_window(connection, mr->window);
                     xcb_change_window_attributes(connection, mr->window, XCB_CW_BORDER_PIXEL, &unfocused_border);
@@ -266,7 +268,6 @@ int main() {
 
                 case XCB_CONFIGURE_REQUEST: {
                     auto* cr = (xcb_configure_request_event_t*)event;
-                    std::cout << "ConfigureRequest received for window: " << cr->window << std::endl;
                     uint32_t values[4];
                     uint16_t mask_config = 0;
                     mask_config |= XCB_CONFIG_WINDOW_X;
@@ -298,7 +299,6 @@ int main() {
 
                 case XCB_DESTROY_NOTIFY: {
                     auto* dn = (xcb_destroy_notify_event_t*)event;
-                    std::cout << "Window destroyed " << dn->window << std::endl;
                     if (focused_client_window == dn->window) {
                         focused_client_window = XCB_WINDOW_NONE;
                     }
@@ -315,19 +315,15 @@ int main() {
 
                 case XCB_KEY_PRESS: {
                     auto* kp = (xcb_key_press_event_t*)event;
-                    std::cout << "Key Press event: Keycode = " << (int)kp->detail << ", State (Modifiers) = " << (int)kp->state << std::endl;
                     uint16_t current_modmask = kp->state & (modmask_super | num_lock_mask | caps_lock_mask);
 
                     if ((kp->detail == KEYCODE_RETURN) && (current_modmask & modmask_super)) {
-                        std::cout << "Super+Return detected, launching st." << std::endl;
                         spawn("st");
                     }
                     else if ((kp->detail) == KEYCODE_D && (current_modmask & modmask_super)) {
-                        std::cout << "Super+D detected, launching dmenu." << std::endl;
                         spawn("dmenu_run");
                     }
                     else if ((kp->detail == KEYCODE_ESCAPE) && (current_modmask & modmask_super)) {
-                        std::cout << "Super+Escape detected, quitting WM." << std::endl;
                         ungrab_key_with_mods(connection, screen->root, KEYCODE_RETURN, modmask_super);
                         ungrab_key_with_mods(connection, screen->root, KEYCODE_ESCAPE, modmask_super);
                         ungrab_key_with_mods(connection, screen->root, KEYCODE_D, modmask_super);
@@ -342,23 +338,40 @@ int main() {
                         goto end_loop;
                     }
                     else if ((kp->detail == KEYCODE_Q) && (current_modmask & modmask_super)) {
-                        std::cout << "Super+Q pressed. Checking focused_client_window..." << std::endl;
-                        std::cout << "  Current focused_client_window: " << focused_client_window << std::endl;
-                        std::cout << "  Screen root window: " << screen->root << std::endl;
                         if (focused_client_window != XCB_WINDOW_NONE && focused_client_window != screen->root) {
-                            std::cout << "  Focused client window is valid. Attempting to kill: " << focused_client_window << std::endl;
                             kill_client(connection, focused_client_window);
                         }
-                        else {
-                            std::cout << "No valid client window focused to kill" << std::endl;
+                    }
+                    else if ((kp->detail == KEYCODE_J && (current_modmask & modmask_super))) {
+                        if (!client_windows.empty()) {
+                            auto it = std::find(client_windows.begin(), client_windows.end(), focused_client_window);
+                            if (it != client_windows.end()) {
+                                ++it;
+                                if (it == client_windows.end()) {
+                                    it = client_windows.begin();
+                                }
+                                focus_client(connection, *it);
+                            } else {
+                                focus_client(connection, client_windows[0]);
+                            }
                         }
                     }
-                    else if ((kp->detail == KEYCODE_J) && (current_modmask & modmask_super)) {
-                        // to be done
-                    }
                     else if ((kp->detail == KEYCODE_K) && (current_modmask & modmask_super)) {
-                        // to be done
+                        if (!client_windows.empty()) {
+                            auto it = std::find(client_windows.begin(), client_windows.end(), focused_client_window);
+                            if (it != client_windows.end()) {
+                                if (it == client_windows.begin()) {
+                                    it = client_windows.end() - 1;
+                                } else {
+                                    --it;
+                                }
+                                focus_client(connection, *it);
+                            } else {
+                                focus_client(connection, client_windows.back());
+                            }
+                        }
                     }
+
                     else if ((kp->detail == KEYCODE_PLUS) && (current_modmask & modmask_super)) {
                         gap_size += 2;
                         apply_master_stack(connection, screen);
@@ -372,10 +385,6 @@ int main() {
 
                 case XCB_FOCUS_IN: {
                     xcb_focus_in_event_t* fi = reinterpret_cast<xcb_focus_in_event_t *>(event);
-                    std::cout << "\n--- FOCUS_IN Event Received ---" << std::endl;
-                    std::cout << "  Event Window (fi->event): " << fi->event << std::endl;
-                    std::cout << "  Detail (how focus changed): " << (int)fi->detail << std::endl;
-                    std::cout << "  Screen root window: " << screen->root << std::endl;
 
                     bool is_client = false;
                     for (xcb_window_t client : client_windows) {
@@ -386,44 +395,24 @@ int main() {
                     }
 
                     if (is_client && fi->event != focused_client_window) {
-                        std::cout << "Focus changed to client window: " << fi->event << std::endl;
                         focused_client_window = fi->event;
                     }
                     break;
                 }
-
-                case XCB_ENTER_NOTIFY: {
-                    if (ignore_enter_events) {
-                        std::cout << "ENTER_NOTIFY ignored (recent focus change)" << std::endl;
-                        break;
-                    }
-
-                    xcb_enter_notify_event_t* en = reinterpret_cast<xcb_enter_notify_event_t *>(event);
-                    std::cout << "\n--- ENTER_NOTIFY Event Received ---" << std::endl;
-                    std::cout << "  Event Window: " << en->event << std::endl;
-                    std::cout << "  Detail: " << (int)en->detail << std::endl;
-                    std::cout << "  Mode: " << (int)en->mode << std::endl;
-
-                    if (en->mode != XCB_NOTIFY_MODE_NORMAL) {
-                        std::cout << "  Ignoring ENTER_NOTIFY (mode != NORMAL)" << std::endl;
-                        break;
-                    }
-
+                case XCB_BUTTON_PRESS: {
+                    auto* bp = (xcb_button_press_event_t *)event;
                     bool is_client_window = false;
                     for (xcb_window_t client_win : client_windows) {
-                        if (client_win == en->event) {
+                        if (client_win == bp->event) {
                             is_client_window = true;
                             break;
                         }
                     }
-
-                    if (is_client_window && en->event != focused_client_window) {
-                        std::cout << "  Mouse entered client window " << en->event << ". Attempting to focus." << std::endl;
-                        focus_client(connection, en->event);
-                    } else if (en->event == screen->root) {
-                        std::cout << "  Mouse entered root window. Clearing client focus if set." << std::endl;
-                        focused_client_window = XCB_WINDOW_NONE;
+                    if (is_client_window && bp->event != focused_client_window) {
+                        focus_client(connection, bp->event);
                     }
+                    xcb_allow_events(connection, XCB_ALLOW_SYNC_POINTER, bp->time);
+                    xcb_flush(connection);
                     break;
                 }
 
