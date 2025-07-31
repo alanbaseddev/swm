@@ -16,12 +16,51 @@ constexpr xcb_keycode_t KEYCODE_K = 45;
 constexpr xcb_keycode_t KEYCODE_D = 40;
 constexpr xcb_keycode_t KEYCODE_PLUS = 21;
 constexpr xcb_keycode_t KEYCODE_MINUS = 20;
+constexpr xcb_keycode_t KEYCODE_1 = 10;
+constexpr xcb_keycode_t KEYCODE_2 = 11;
+constexpr xcb_keycode_t KEYCODE_3 = 12;
+constexpr xcb_keycode_t KEYCODE_4 = 13;
+constexpr xcb_keycode_t KEYCODE_5 = 14;
+constexpr xcb_keycode_t KEYCODE_6 = 15;
+constexpr xcb_keycode_t KEYCODE_7 = 16;
+constexpr xcb_keycode_t KEYCODE_8 = 17;
+constexpr xcb_keycode_t KEYCODE_9 = 18;
+constexpr int MAX_WORKSPACES = 9;
 int gap_size = 20;
 
 xcb_window_t focused_client_window = XCB_WINDOW_NONE;
 std::vector<xcb_window_t> client_windows;
 uint32_t focused_border;
 uint32_t unfocused_border;
+
+struct Workspaces {
+    std::vector<xcb_window_t> windows;
+    xcb_window_t focused_window = XCB_WINDOW_NONE;
+};
+std::array<Workspaces, MAX_WORKSPACES> workspaces;
+int current_workspace = 0;
+
+std::vector<xcb_window_t>& get_current_windows() {
+    return workspaces[current_workspace].windows;
+}
+
+xcb_window_t& get_current_focused() {
+    return workspaces[current_workspace].focused_window;
+}
+
+void hide_workspace_windows(xcb_connection_t* conn, int workspace_id) {
+    for (xcb_window_t window : workspaces[workspace_id].windows) {
+        xcb_unmap_window(conn, window);
+    }
+    xcb_flush(conn);
+}
+
+void show_workspace_windows(xcb_connection_t* conn, int workspace_id) {
+    for (xcb_window_t window : workspaces[workspace_id].windows) {
+        xcb_map_window(conn, window);
+    }
+    xcb_flush(conn);
+}
 
 
 void spawn(const char* command) {
@@ -49,6 +88,7 @@ void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
         xcb_change_window_attributes(conn, window_id, XCB_CW_BORDER_PIXEL, &focused_border);
         last_focused = window_id;
         std::cout << "Focusing client " << window_id << std::endl;
+        get_current_focused() = window_id;
         focused_client_window = window_id;
         xcb_set_input_focus(conn, XCB_INPUT_FOCUS_POINTER_ROOT, window_id, XCB_CURRENT_TIME);
         xcb_circulate_window(conn, XCB_CIRCULATE_RAISE_LOWEST, window_id);
@@ -97,6 +137,7 @@ void ungrab_key_with_mods(xcb_connection_t* conn, xcb_window_t root, xcb_keycode
     xcb_ungrab_key(conn, keycode, modifiers | caps_lock_mask, root);
     xcb_ungrab_key(conn, keycode, modifiers | num_lock_mask, root);
     xcb_ungrab_key(conn, keycode, modifiers | num_lock_mask | caps_lock_mask, root);
+    xcb_ungrab_key(conn, keycode, modifiers | num_lock_mask | caps_lock_mask, root);
 }
 
 uint32_t get_color_pixel(xcb_connection_t* conn, xcb_screen_t* screen, uint16_t red, uint16_t green, uint16_t blue) {
@@ -109,25 +150,26 @@ uint32_t get_color_pixel(xcb_connection_t* conn, xcb_screen_t* screen, uint16_t 
 }
 
 void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
-    if (client_windows.empty()) return;
+    auto& current_windows = get_current_windows();
+    if (current_windows.empty()) return;
 
-    if (client_windows.size() == 1) {
+    if (current_windows.size() == 1) {
         uint32_t fullscreen_geom[4] = {
             gap_size, // x
             gap_size, // y
             (uint32_t)(screen->width_in_pixels - 2 * gap_size),
             (uint32_t)(screen->height_in_pixels - 2 * gap_size)
         };
-        xcb_configure_window(connection, client_windows[0], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, fullscreen_geom);
+        xcb_configure_window(connection, current_windows[0], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, fullscreen_geom);
         xcb_flush(connection);
         return;
     }
-    xcb_window_t master = client_windows[0];
+    xcb_window_t master = current_windows[0];
     int usable_width = screen->width_in_pixels - 2 * gap_size;
     int usable_height = screen->height_in_pixels - 2 * gap_size;
     int master_width = (usable_width * 0.6) - (gap_size / 2);
     int stack_width = usable_width - master_width - gap_size;
-    int stack_count = client_windows.size() - 1;
+    int stack_count = current_windows.size() - 1;
 
     uint32_t master_geom[4] = {
         gap_size,
@@ -139,7 +181,7 @@ void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
         master_geom);
 
-    for (size_t i = 1; i < client_windows.size(); ++i) {
+    for (size_t i = 1; i < current_windows.size(); ++i) {
         int stack_height_per_window = (usable_height - (stack_count - 1) * gap_size) / stack_count;
         int stack_y = gap_size + (i-1) * (stack_height_per_window + gap_size);
         uint32_t stack_geom[4] = {
@@ -148,11 +190,53 @@ void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
             (uint32_t)stack_width,
             (uint32_t)stack_height_per_window
         };
-        xcb_configure_window(connection, client_windows[i],
+        xcb_configure_window(connection, current_windows[i],
             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
             stack_geom);
     }
     xcb_flush(connection);
+}
+
+void switch_workspace(xcb_connection_t* conn, xcb_screen_t* screen, int new_workspace) {
+    if (new_workspace == current_workspace || new_workspace < 0 || new_workspace >= MAX_WORKSPACES) {
+        return;
+    }
+    hide_workspace_windows(conn, current_workspace);
+    current_workspace = new_workspace;
+    show_workspace_windows(conn, current_workspace);
+    apply_master_stack(conn, screen);
+    if (!get_current_windows().empty()) {
+        if (get_current_focused() != XCB_WINDOW_NONE) {
+            focus_client(conn, get_current_focused());
+        } else {
+            focus_client(conn, get_current_windows()[0]);
+        }
+    } else {
+        focused_client_window = XCB_WINDOW_NONE;
+    }
+}
+
+void move_window_to_workspace(xcb_connection_t* conn, xcb_screen_t* screen, xcb_window_t window, int target_workspace) {
+    if (target_workspace < 0 || target_workspace >= MAX_WORKSPACES || target_workspace == current_workspace) {
+        return;
+    }
+    auto& current_windows = get_current_windows();
+    auto it = std::find(current_windows.begin(), current_windows.end(), window);
+    if (it != current_windows.end()) {
+        current_windows.erase(it);
+        workspaces[target_workspace].windows.push_back(window);
+        xcb_unmap_window(conn, window);
+        if (get_current_focused() == window) {
+            if (!current_windows.empty()) {
+                focus_client(conn, current_windows.back());
+            } else {
+                get_current_focused() = XCB_WINDOW_NONE;
+                focused_client_window = XCB_WINDOW_NONE;
+            }
+        }
+        apply_master_stack(conn, screen);
+        xcb_flush(conn);
+    }
 }
 
 int main() {
@@ -211,6 +295,25 @@ int main() {
         grab_key_with_mods(KEYCODE_D, modmask_super);
         grab_key_with_mods(KEYCODE_PLUS, modmask_super);
         grab_key_with_mods(KEYCODE_MINUS, modmask_super);
+        grab_key_with_mods(KEYCODE_1, modmask_super);
+        grab_key_with_mods(KEYCODE_2, modmask_super);
+        grab_key_with_mods(KEYCODE_3, modmask_super);
+        grab_key_with_mods(KEYCODE_4, modmask_super);
+        grab_key_with_mods(KEYCODE_5, modmask_super);
+        grab_key_with_mods(KEYCODE_6, modmask_super);
+        grab_key_with_mods(KEYCODE_7, modmask_super);
+        grab_key_with_mods(KEYCODE_8, modmask_super);
+        grab_key_with_mods(KEYCODE_9, modmask_super);
+        grab_key_with_mods(KEYCODE_1, modmask_super | XCB_MOD_MASK_SHIFT);
+        grab_key_with_mods(KEYCODE_2, modmask_super | XCB_MOD_MASK_SHIFT);
+        grab_key_with_mods(KEYCODE_3, modmask_super | XCB_MOD_MASK_SHIFT);
+        grab_key_with_mods(KEYCODE_4, modmask_super | XCB_MOD_MASK_SHIFT);
+        grab_key_with_mods(KEYCODE_5, modmask_super | XCB_MOD_MASK_SHIFT);
+        grab_key_with_mods(KEYCODE_6, modmask_super | XCB_MOD_MASK_SHIFT);
+        grab_key_with_mods(KEYCODE_7, modmask_super | XCB_MOD_MASK_SHIFT);
+        grab_key_with_mods(KEYCODE_8, modmask_super | XCB_MOD_MASK_SHIFT);
+        grab_key_with_mods(KEYCODE_9, modmask_super | XCB_MOD_MASK_SHIFT);
+
         xcb_flush(connection);
 
         while ((event = xcb_wait_for_event(connection))) {
@@ -259,7 +362,7 @@ int main() {
                     xcb_send_event(connection, 0, mr->window, XCB_EVENT_MASK_STRUCTURE_NOTIFY, (const char*)&configure_notify_event);
                     xcb_flush(connection);
 
-                    client_windows.push_back(mr->window);
+                    get_current_windows().push_back(mr->window);
                     apply_master_stack(connection, screen);
 
                     focus_client(connection, mr->window);
@@ -299,23 +402,38 @@ int main() {
 
                 case XCB_DESTROY_NOTIFY: {
                     auto* dn = (xcb_destroy_notify_event_t*)event;
-                    if (focused_client_window == dn->window) {
-                        focused_client_window = XCB_WINDOW_NONE;
+                    bool found = false;
+                    for (int i = 0; i < MAX_WORKSPACES; ++i) {
+                        auto& windows = workspaces[i].windows;
+                        auto it = std::find(windows.begin(), windows.end(), dn->window);
+                        if (it != windows.end()) {
+                            windows.erase(it);
+                            found = true;
+                            if (workspaces[i].focused_window == dn->window) {
+                                if (!windows.empty()) {
+                                    workspaces[i].focused_window = windows.back();
+                                    if (i == current_workspace) {
+                                        focus_client(connection, windows.back());
+                                    }
+                                } else {
+                                    workspaces[i].focused_window = XCB_WINDOW_NONE;
+                                    if (i == current_workspace) {
+                                        focused_client_window = XCB_WINDOW_NONE;
+                                    }
+                                }
+                            }
+                            break;
+                        }
                     }
-                    client_windows.erase(
-                        std::remove(client_windows.begin(), client_windows.end(), dn->window),
-                        client_windows.end());
-                    apply_master_stack(connection, screen);
-
-                    if (!client_windows.empty() && focused_client_window == XCB_WINDOW_NONE) {
-                        focus_client(connection, client_windows.back());
+                    if (found) {
+                        apply_master_stack(connection, screen);
                     }
                     break;
                 }
 
                 case XCB_KEY_PRESS: {
                     auto* kp = (xcb_key_press_event_t*)event;
-                    uint16_t current_modmask = kp->state & (modmask_super | num_lock_mask | caps_lock_mask);
+                    uint16_t current_modmask = kp->state & (modmask_super | num_lock_mask | caps_lock_mask | XCB_MOD_MASK_SHIFT);
 
                     if ((kp->detail == KEYCODE_RETURN) && (current_modmask & modmask_super)) {
                         spawn("st");
@@ -343,31 +461,33 @@ int main() {
                         }
                     }
                     else if ((kp->detail == KEYCODE_J && (current_modmask & modmask_super))) {
-                        if (!client_windows.empty()) {
-                            auto it = std::find(client_windows.begin(), client_windows.end(), focused_client_window);
-                            if (it != client_windows.end()) {
+                        auto& current_windows = get_current_windows();
+                        if (!current_windows.empty()) {
+                            auto it = std::find(current_windows.begin(), current_windows.end(), get_current_focused());
+                            if (it != current_windows.end()) {
                                 ++it;
-                                if (it == client_windows.end()) {
-                                    it = client_windows.begin();
+                                if (it == current_windows.end()) {
+                                    it = current_windows.begin();
                                 }
                                 focus_client(connection, *it);
                             } else {
-                                focus_client(connection, client_windows[0]);
+                                focus_client(connection, current_windows[0]);
                             }
                         }
                     }
                     else if ((kp->detail == KEYCODE_K) && (current_modmask & modmask_super)) {
-                        if (!client_windows.empty()) {
-                            auto it = std::find(client_windows.begin(), client_windows.end(), focused_client_window);
-                            if (it != client_windows.end()) {
-                                if (it == client_windows.begin()) {
-                                    it = client_windows.end() - 1;
+                        auto& current_windows = get_current_windows();
+                        if (!current_windows.empty()) {
+                            auto it = std::find(current_windows.begin(), current_windows.end(), get_current_focused());
+                            if (it != current_windows.end()) {
+                                if (it == current_windows.begin()) {
+                                    it = current_windows.end() - 1;
                                 } else {
                                     --it;
                                 }
                                 focus_client(connection, *it);
                             } else {
-                                focus_client(connection, client_windows.back());
+                                focus_client(connection, current_windows.back());
                             }
                         }
                     }
@@ -380,14 +500,45 @@ int main() {
                         gap_size -= 2;
                         apply_master_stack(connection, screen);
                     }
+                    else if ((current_modmask & modmask_super) && !(current_modmask & XCB_MOD_MASK_SHIFT)) {
+                        int target_workspace = -1;
+                        if (kp->detail == KEYCODE_1) target_workspace = 0;
+                        else if (kp->detail == KEYCODE_2) target_workspace = 1;
+                        else if (kp->detail == KEYCODE_3) target_workspace = 2;
+                        else if (kp->detail == KEYCODE_4) target_workspace = 3;
+                        else if (kp->detail == KEYCODE_5) target_workspace = 4;
+                        else if (kp->detail == KEYCODE_6) target_workspace = 5;
+                        else if (kp->detail == KEYCODE_7) target_workspace = 6;
+                        else if (kp->detail == KEYCODE_8) target_workspace = 7;
+                        else if (kp->detail == KEYCODE_9) target_workspace = 8;
+                        if (target_workspace != -1) {
+                            switch_workspace(connection, screen, target_workspace);
+                        }
+                    }
+                    else if ((current_modmask & modmask_super) && (current_modmask & XCB_MOD_MASK_SHIFT)) {
+                        int target_workspace = -1;
+                        if (kp->detail == KEYCODE_1) target_workspace = 0;
+                        else if (kp->detail == KEYCODE_2) target_workspace = 1;
+                        else if (kp->detail == KEYCODE_3) target_workspace = 2;
+                        else if (kp->detail == KEYCODE_4) target_workspace = 3;
+                        else if (kp->detail == KEYCODE_5) target_workspace = 4;
+                        else if (kp->detail == KEYCODE_6) target_workspace = 5;
+                        else if (kp->detail == KEYCODE_7) target_workspace = 6;
+                        else if (kp->detail == KEYCODE_8) target_workspace = 7;
+                        else if (kp->detail == KEYCODE_9) target_workspace = 8;
+                        if (target_workspace != -1 && get_current_focused() != XCB_WINDOW_NONE) {
+                            move_window_to_workspace(connection, screen, get_current_focused(), target_workspace);
+                        }
+                    }
                     break;
                 }
 
                 case XCB_FOCUS_IN: {
                     xcb_focus_in_event_t* fi = reinterpret_cast<xcb_focus_in_event_t *>(event);
+                    auto& current_windows = get_current_windows();
 
                     bool is_client = false;
-                    for (xcb_window_t client : client_windows) {
+                    for (xcb_window_t client : current_windows) {
                         if (client == fi->event) {
                             is_client = true;
                             break;
@@ -402,13 +553,14 @@ int main() {
                 case XCB_BUTTON_PRESS: {
                     auto* bp = (xcb_button_press_event_t *)event;
                     bool is_client_window = false;
-                    for (xcb_window_t client_win : client_windows) {
+                    auto& current_windows = get_current_windows();
+                    for (xcb_window_t client_win : current_windows) {
                         if (client_win == bp->event) {
                             is_client_window = true;
                             break;
                         }
                     }
-                    if (is_client_window && bp->event != focused_client_window) {
+                    if (is_client_window && bp->event != get_current_focused()) {
                         focus_client(connection, bp->event);
                     }
                     xcb_allow_events(connection, XCB_ALLOW_SYNC_POINTER, bp->time);
