@@ -11,8 +11,10 @@ constexpr xcb_keycode_t KEYCODE_RETURN = 36;
 constexpr xcb_keycode_t KEYCODE_ESCAPE = 9;
 constexpr xcb_keycode_t KEYCODE_Q = 24;
 constexpr xcb_keycode_t KEYCODE_W = 25;
+constexpr xcb_keycode_t KEYCODE_H = 43;
 constexpr xcb_keycode_t KEYCODE_J = 44;
 constexpr xcb_keycode_t KEYCODE_K = 45;
+constexpr xcb_keycode_t KEYCODE_L = 46;
 constexpr xcb_keycode_t KEYCODE_D = 40;
 constexpr xcb_keycode_t KEYCODE_PLUS = 21;
 constexpr xcb_keycode_t KEYCODE_MINUS = 20;
@@ -27,6 +29,7 @@ constexpr xcb_keycode_t KEYCODE_8 = 17;
 constexpr xcb_keycode_t KEYCODE_9 = 18;
 constexpr int MAX_WORKSPACES = 9;
 int gap_size = 20;
+float master_ratio = 0.6f;
 
 xcb_window_t focused_client_window = XCB_WINDOW_NONE;
 std::vector<xcb_window_t> client_windows;
@@ -167,7 +170,7 @@ void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
     xcb_window_t master = current_windows[0];
     int usable_width = screen->width_in_pixels - 2 * gap_size;
     int usable_height = screen->height_in_pixels - 2 * gap_size;
-    int master_width = (usable_width * 0.6) - (gap_size / 2);
+    int master_width = (usable_width * master_ratio) - (gap_size / 2);
     int stack_width = usable_width - master_width - gap_size;
     int stack_count = current_windows.size() - 1;
 
@@ -290,8 +293,10 @@ int main() {
         grab_key_with_mods(KEYCODE_ESCAPE, modmask_super);
         grab_key_with_mods(KEYCODE_Q, modmask_super);
         grab_key_with_mods(KEYCODE_W, modmask_super);
+        grab_key_with_mods(KEYCODE_H, modmask_super);
         grab_key_with_mods(KEYCODE_J, modmask_super);
         grab_key_with_mods(KEYCODE_K, modmask_super);
+        grab_key_with_mods(KEYCODE_L, modmask_super);
         grab_key_with_mods(KEYCODE_D, modmask_super);
         grab_key_with_mods(KEYCODE_PLUS, modmask_super);
         grab_key_with_mods(KEYCODE_MINUS, modmask_super);
@@ -498,6 +503,14 @@ int main() {
                     }
                     else if ((kp->detail == KEYCODE_MINUS) && (current_modmask & modmask_super)) {
                         gap_size -= 2;
+                        apply_master_stack(connection, screen);
+                    }
+                    else if ((kp->detail == KEYCODE_H) && (current_modmask & modmask_super)) {
+                        master_ratio = std::max(0.1f, master_ratio - 0.05f);
+                        apply_master_stack(connection, screen);
+                    }
+                    else if ((kp->detail == KEYCODE_L) && (current_modmask & modmask_super)) {
+                        master_ratio = std::min(0.9f, master_ratio + 0.05f);
                         apply_master_stack(connection, screen);
                     }
                     else if ((current_modmask & modmask_super) && !(current_modmask & XCB_MOD_MASK_SHIFT)) {
