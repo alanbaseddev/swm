@@ -563,7 +563,7 @@ int main() {
                     if (is_client_window && bp->event != get_current_focused()) {
                         focus_client(connection, bp->event);
                     }
-                    xcb_allow_events(connection, XCB_ALLOW_SYNC_POINTER, bp->time);
+                    xcb_allow_events(connection, XCB_ALLOW_REPLAY_POINTER, bp->time);
                     xcb_flush(connection);
                     break;
                 }
