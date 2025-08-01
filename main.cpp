@@ -9,6 +9,7 @@
 
 constexpr xcb_keycode_t KEYCODE_RETURN = 36;
 constexpr xcb_keycode_t KEYCODE_ESCAPE = 9;
+constexpr xcb_keycode_t KEYCODE_SPACE = 65;
 constexpr xcb_keycode_t KEYCODE_Q = 24;
 constexpr xcb_keycode_t KEYCODE_W = 25;
 constexpr xcb_keycode_t KEYCODE_H = 43;
@@ -30,11 +31,21 @@ constexpr xcb_keycode_t KEYCODE_9 = 18;
 constexpr int MAX_WORKSPACES = 9;
 int gap_size = 20;
 float master_ratio = 0.6f;
+std::vector<xcb_window_t> floating_windows;
 
 xcb_window_t focused_client_window = XCB_WINDOW_NONE;
 std::vector<xcb_window_t> client_windows;
 uint32_t focused_border;
 uint32_t unfocused_border;
+
+struct DragState {
+    bool is_dragging = false;
+    bool is_resizing = false;
+    xcb_window_t dragged_window = XCB_WINDOW_NONE;
+    int start_x{}, start_y{};
+    int start_width{}, start_height{};
+    int start_win_x{}, start_win_y{};
+} drag_state;
 
 struct Workspaces {
     std::vector<xcb_window_t> windows;
@@ -65,6 +76,9 @@ void show_workspace_windows(xcb_connection_t* conn, int workspace_id) {
     xcb_flush(conn);
 }
 
+bool is_floating(xcb_window_t window) {
+    return std::find(floating_windows.begin(), floating_windows.end(), window) != floating_windows.end();
+}
 
 void spawn(const char* command) {
     if (fork() == 0) {
@@ -80,7 +94,6 @@ void spawn(const char* command) {
 void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
     static xcb_window_t last_focused = XCB_WINDOW_NONE;
     if (focused_client_window == window_id) return;
-
 
     if (last_focused != XCB_WINDOW_NONE && last_focused != window_id) {
         std::cout << "  Changing border of previous focused window " << last_focused << " to unfocused color." << std::endl;
@@ -154,25 +167,35 @@ uint32_t get_color_pixel(xcb_connection_t* conn, xcb_screen_t* screen, uint16_t 
 
 void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
     auto& current_windows = get_current_windows();
-    if (current_windows.empty()) return;
+    std::vector<xcb_window_t> tilling_windows;
+    for (xcb_window_t window : current_windows) {
+        if (!is_floating(window)) {
+            tilling_windows.push_back(window);
+        }
+    }
+    if (tilling_windows.empty()) return;
 
-    if (current_windows.size() == 1) {
+    if (tilling_windows.size() == 1) {
         uint32_t fullscreen_geom[4] = {
             gap_size, // x
             gap_size, // y
             (uint32_t)(screen->width_in_pixels - 2 * gap_size),
             (uint32_t)(screen->height_in_pixels - 2 * gap_size)
         };
-        xcb_configure_window(connection, current_windows[0], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, fullscreen_geom);
+        xcb_configure_window(connection, tilling_windows[0], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, fullscreen_geom);
         xcb_flush(connection);
         return;
     }
-    xcb_window_t master = current_windows[0];
+    /*for (xcb_window_t tilled_window : tilling_windows) {
+        uint32_t values[] = {XCB_STACK_MODE_BELOW};
+        xcb_configure_window(connection, tilled_window, XCB_CONFIG_WINDOW_STACK_MODE, values);
+    } */
+    xcb_window_t master = tilling_windows[0];
     int usable_width = screen->width_in_pixels - 2 * gap_size;
     int usable_height = screen->height_in_pixels - 2 * gap_size;
     int master_width = (usable_width * master_ratio) - (gap_size / 2);
     int stack_width = usable_width - master_width - gap_size;
-    int stack_count = current_windows.size() - 1;
+    int stack_count = tilling_windows.size() - 1;
 
     uint32_t master_geom[4] = {
         gap_size,
@@ -184,7 +207,7 @@ void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
         master_geom);
 
-    for (size_t i = 1; i < current_windows.size(); ++i) {
+    for (size_t i = 1; i < tilling_windows.size(); ++i) {
         int stack_height_per_window = (usable_height - (stack_count - 1) * gap_size) / stack_count;
         int stack_y = gap_size + (i-1) * (stack_height_per_window + gap_size);
         uint32_t stack_geom[4] = {
@@ -193,9 +216,14 @@ void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
             (uint32_t)stack_width,
             (uint32_t)stack_height_per_window
         };
-        xcb_configure_window(connection, current_windows[i],
+        xcb_configure_window(connection, tilling_windows[i],
             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
             stack_geom);
+
+    }
+    for (xcb_window_t floating_window : floating_windows) {
+        uint32_t values[] = { XCB_STACK_MODE_ABOVE };
+        xcb_configure_window(connection, floating_window, XCB_CONFIG_WINDOW_STACK_MODE, values);
     }
     xcb_flush(connection);
 }
@@ -242,6 +270,113 @@ void move_window_to_workspace(xcb_connection_t* conn, xcb_screen_t* screen, xcb_
     }
 }
 
+void toggle_floating(xcb_connection_t* conn, xcb_screen_t* screen, xcb_window_t window) {
+    if (window == XCB_WINDOW_NONE) return;
+    auto it = std::find(floating_windows.begin(), floating_windows.end(), window);
+    if ( it != floating_windows.end() ) {
+        floating_windows.erase(it);
+        std::cout << "Window " << window << " is now tiled" << std::endl;
+    } else {
+        floating_windows.push_back(window);
+        std::cout << "Window " << window << " is now floating" << std::endl;
+        uint32_t floating_geom[4] = {
+            screen->width_in_pixels / 4,
+            screen->height_in_pixels / 4,
+            screen->width_in_pixels / 2,
+            screen->height_in_pixels / 2
+        };
+        xcb_configure_window(conn, window, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, floating_geom);
+        uint32_t values[] = { XCB_STACK_MODE_ABOVE };
+        xcb_configure_window(conn, window, XCB_CONFIG_WINDOW_STACK_MODE, values);
+    }
+    apply_master_stack(conn, screen);
+    xcb_flush(conn);
+}
+
+void get_window_geometry(xcb_connection_t* conn, xcb_window_t window, int* x, int* y, int* width, int* height) {
+    xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(conn, window);
+    xcb_get_geometry_reply_t* geom_reply = xcb_get_geometry_reply(conn, geom_cookie, nullptr);
+    if (geom_reply) {
+        *x = geom_reply->x;
+        *y = geom_reply->y;
+        *width = geom_reply->width;
+        *height = geom_reply->height;
+        free(geom_reply);
+    }
+}
+
+void start_drag(xcb_connection_t* conn, xcb_window_t window, int pointer_x, int pointer_y) {
+    if (!is_floating(window)) return;
+
+    drag_state.is_dragging = true;
+    drag_state.dragged_window = window;
+    drag_state.start_x = pointer_x;
+    drag_state.start_y = pointer_y;
+
+    get_window_geometry(conn, window, &drag_state.start_win_x, &drag_state.start_win_y,
+                       &drag_state.start_width, &drag_state.start_height);
+
+    xcb_grab_pointer(conn, 0, window,
+                    XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_POINTER_MOTION,
+                    XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC,
+                    XCB_WINDOW_NONE, XCB_CURSOR_NONE, XCB_CURRENT_TIME);
+
+    std::cout << "Started dragging window " << window << std::endl;
+}
+
+void start_resize(xcb_connection_t* conn, xcb_window_t window, int pointer_x, int pointer_y) {
+    if (!is_floating(window)) return;
+
+    drag_state.is_resizing = true;
+    drag_state.dragged_window = window;
+    drag_state.start_x = pointer_x;
+    drag_state.start_y = pointer_y;
+
+    get_window_geometry(conn, window, &drag_state.start_win_x, &drag_state.start_win_y,
+                       &drag_state.start_width, &drag_state.start_height);
+
+    xcb_grab_pointer(conn, 0, window,
+                    XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_POINTER_MOTION,
+                    XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC,
+                    XCB_WINDOW_NONE, XCB_CURSOR_NONE, XCB_CURRENT_TIME);
+
+    std::cout << "Started resizing window " << window << std::endl;
+}
+
+void update_drag(xcb_connection_t* conn, int pointer_x, int pointer_y) {
+    if (!drag_state.is_dragging && !drag_state.is_resizing) return;
+
+    if (drag_state.is_dragging) {
+        int new_x = drag_state.start_win_x + (pointer_x - drag_state.start_x);
+        int new_y = drag_state.start_win_y + (pointer_y - drag_state.start_y);
+
+        uint32_t values[2] = {(uint32_t)new_x, (uint32_t)new_y};
+        xcb_configure_window(conn, drag_state.dragged_window,
+                           XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
+    } else if (drag_state.is_resizing) {
+        int new_width = std::max(100, drag_state.start_width + (pointer_x - drag_state.start_x));
+        int new_height = std::max(100, drag_state.start_height + (pointer_y - drag_state.start_y));
+
+        uint32_t values[2] = {(uint32_t)new_width, (uint32_t)new_height};
+        xcb_configure_window(conn, drag_state.dragged_window,
+                           XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values);
+    }
+    xcb_flush(conn);
+}
+
+void end_drag(xcb_connection_t* conn) {
+    if (drag_state.is_dragging || drag_state.is_resizing) {
+        xcb_ungrab_pointer(conn, XCB_CURRENT_TIME);
+        std::cout << "Finished " << (drag_state.is_dragging ? "dragging" : "resizing")
+                  << " window " << drag_state.dragged_window << std::endl;
+    }
+
+    drag_state.is_dragging = false;
+    drag_state.is_resizing = false;
+    drag_state.dragged_window = XCB_WINDOW_NONE;
+    xcb_flush(conn);
+}
+
 int main() {
     xcb_connection_t* connection;
     xcb_screen_t* screen;
@@ -267,6 +402,8 @@ int main() {
                XCB_EVENT_MASK_KEY_PRESS |
                XCB_EVENT_MASK_FOCUS_CHANGE |
                XCB_EVENT_MASK_BUTTON_PRESS |
+               XCB_EVENT_MASK_BUTTON_RELEASE |
+               XCB_EVENT_MASK_POINTER_MOTION |
                XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
 
         xcb_change_window_attributes(connection, screen->root, XCB_CW_EVENT_MASK, &mask);
@@ -289,7 +426,27 @@ int main() {
             xcb_grab_key(connection, 1, screen->root, modifiers | num_lock_mask | caps_lock_mask, keycode, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
         };
 
+        auto grab_button_with_mods = [&](xcb_button_index_t button, uint16_t modifiers) {
+            xcb_grab_button(connection, 0, screen->root,
+                          XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_POINTER_MOTION,
+                          XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC,
+                          XCB_WINDOW_NONE, XCB_CURSOR_NONE, button, modifiers);
+            xcb_grab_button(connection, 0, screen->root,
+                          XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_POINTER_MOTION,
+                          XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC,
+                          XCB_WINDOW_NONE, XCB_CURSOR_NONE, button, modifiers | num_lock_mask);
+            xcb_grab_button(connection, 0, screen->root,
+                          XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_POINTER_MOTION,
+                          XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC,
+                          XCB_WINDOW_NONE, XCB_CURSOR_NONE, button, modifiers | caps_lock_mask);
+            xcb_grab_button(connection, 0, screen->root,
+                          XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_POINTER_MOTION,
+                          XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC,
+                          XCB_WINDOW_NONE, XCB_CURSOR_NONE, button, modifiers | num_lock_mask | caps_lock_mask);
+        };
+
         grab_key_with_mods(KEYCODE_RETURN, modmask_super);
+        grab_key_with_mods(KEYCODE_SPACE, modmask_super);
         grab_key_with_mods(KEYCODE_ESCAPE, modmask_super);
         grab_key_with_mods(KEYCODE_Q, modmask_super);
         grab_key_with_mods(KEYCODE_W, modmask_super);
@@ -319,10 +476,12 @@ int main() {
         grab_key_with_mods(KEYCODE_8, modmask_super | XCB_MOD_MASK_SHIFT);
         grab_key_with_mods(KEYCODE_9, modmask_super | XCB_MOD_MASK_SHIFT);
 
+        grab_button_with_mods(XCB_BUTTON_INDEX_1, modmask_super);
+        grab_button_with_mods(XCB_BUTTON_INDEX_3, modmask_super);
+
         xcb_flush(connection);
 
         while ((event = xcb_wait_for_event(connection))) {
-
 
             switch (event->response_type & ~0x80) {
                 case XCB_MAP_REQUEST: {
@@ -430,6 +589,10 @@ int main() {
                             break;
                         }
                     }
+                    auto float_it = std::find(floating_windows.begin(), floating_windows.end(), dn->window);
+                    if (float_it != floating_windows.end()) {
+                        floating_windows.erase(float_it);
+                    }
                     if (found) {
                         apply_master_stack(connection, screen);
                     }
@@ -446,9 +609,15 @@ int main() {
                     else if ((kp->detail) == KEYCODE_D && (current_modmask & modmask_super)) {
                         spawn("dmenu_run");
                     }
+                    else if ((kp->detail == KEYCODE_SPACE) && (current_modmask & modmask_super)) {
+                        if (get_current_focused() != XCB_WINDOW_NONE) {
+                            toggle_floating(connection, screen, get_current_focused());
+                        }
+                    }
                     else if ((kp->detail == KEYCODE_ESCAPE) && (current_modmask & modmask_super)) {
                         ungrab_key_with_mods(connection, screen->root, KEYCODE_RETURN, modmask_super);
                         ungrab_key_with_mods(connection, screen->root, KEYCODE_ESCAPE, modmask_super);
+                        ungrab_key_with_mods(connection, screen->root, KEYCODE_SPACE, modmask_super);
                         ungrab_key_with_mods(connection, screen->root, KEYCODE_D, modmask_super);
                         ungrab_key_with_mods(connection, screen->root, KEYCODE_Q, modmask_super);
                         ungrab_key_with_mods(connection, screen->root, KEYCODE_W, modmask_super);
@@ -546,6 +715,64 @@ int main() {
                     break;
                 }
 
+                case XCB_BUTTON_PRESS: {
+                    auto* bp = (xcb_button_press_event_t *)event;
+
+                    if (bp->state & modmask_super) {
+                        xcb_window_t target_window = XCB_WINDOW_NONE;
+
+                        xcb_query_pointer_cookie_t pointer_cookie = xcb_query_pointer(connection, screen->root);
+                        xcb_query_pointer_reply_t* pointer_reply = xcb_query_pointer_reply(connection, pointer_cookie, nullptr);
+
+                        if (pointer_reply && pointer_reply->child != XCB_WINDOW_NONE) {
+                            target_window = pointer_reply->child;
+                        }
+
+                        if (target_window != XCB_WINDOW_NONE && is_floating(target_window)) {
+                            focus_client(connection, target_window);
+
+                            if (bp->detail == XCB_BUTTON_INDEX_1) {
+                                start_drag(connection, target_window, bp->root_x, bp->root_y);
+                            } else if (bp->detail == XCB_BUTTON_INDEX_3) {
+                                start_resize(connection, target_window, bp->root_x, bp->root_y);
+                            }
+                        }
+
+                        if (pointer_reply) free(pointer_reply);
+                    } else {
+                        bool is_client_window = false;
+                        auto& current_windows = get_current_windows();
+                        for (xcb_window_t client_win : current_windows) {
+                            if (client_win == bp->event) {
+                                is_client_window = true;
+                                break;
+                            }
+                        }
+                        if (is_client_window && bp->event != get_current_focused()) {
+                            focus_client(connection, bp->event);
+                        }
+                        xcb_allow_events(connection, XCB_ALLOW_REPLAY_POINTER, bp->time);
+                    }
+                    xcb_flush(connection);
+                    break;
+                }
+
+                case XCB_BUTTON_RELEASE: {
+                    auto* br = (xcb_button_release_event_t *)event;
+                    if (drag_state.is_dragging || drag_state.is_resizing) {
+                        end_drag(connection);
+                    }
+                    break;
+                }
+
+                case XCB_MOTION_NOTIFY: {
+                    auto* mn = (xcb_motion_notify_event_t *)event;
+                    if (drag_state.is_dragging || drag_state.is_resizing) {
+                        update_drag(connection, mn->root_x, mn->root_y);
+                    }
+                    break;
+                }
+
                 case XCB_FOCUS_IN: {
                     xcb_focus_in_event_t* fi = reinterpret_cast<xcb_focus_in_event_t *>(event);
                     auto& current_windows = get_current_windows();
@@ -561,23 +788,6 @@ int main() {
                     if (is_client && fi->event != focused_client_window) {
                         focused_client_window = fi->event;
                     }
-                    break;
-                }
-                case XCB_BUTTON_PRESS: {
-                    auto* bp = (xcb_button_press_event_t *)event;
-                    bool is_client_window = false;
-                    auto& current_windows = get_current_windows();
-                    for (xcb_window_t client_win : current_windows) {
-                        if (client_win == bp->event) {
-                            is_client_window = true;
-                            break;
-                        }
-                    }
-                    if (is_client_window && bp->event != get_current_focused()) {
-                        focus_client(connection, bp->event);
-                    }
-                    xcb_allow_events(connection, XCB_ALLOW_REPLAY_POINTER, bp->time);
-                    xcb_flush(connection);
                     break;
                 }
 
