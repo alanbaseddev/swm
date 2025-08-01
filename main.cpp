@@ -173,54 +173,51 @@ void apply_master_stack(xcb_connection_t* connection, xcb_screen_t* screen) {
             tilling_windows.push_back(window);
         }
     }
-    if (tilling_windows.empty()) return;
 
-    if (tilling_windows.size() == 1) {
-        uint32_t fullscreen_geom[4] = {
-            gap_size, // x
-            gap_size, // y
-            (uint32_t)(screen->width_in_pixels - 2 * gap_size),
-            (uint32_t)(screen->height_in_pixels - 2 * gap_size)
-        };
-        xcb_configure_window(connection, tilling_windows[0], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, fullscreen_geom);
-        xcb_flush(connection);
-        return;
+    if (!tilling_windows.empty()) {
+        if (tilling_windows.size() == 1) {
+            uint32_t fullscreen_geom[4] = {
+                gap_size, // x
+                gap_size, // y
+                (uint32_t)(screen->width_in_pixels - 2 * gap_size),
+                (uint32_t)(screen->height_in_pixels - 2 * gap_size)
+            };
+            xcb_configure_window(connection, tilling_windows[0], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, fullscreen_geom);
+        } else {
+            xcb_window_t master = tilling_windows[0];
+            int usable_width = screen->width_in_pixels - 2 * gap_size;
+            int usable_height = screen->height_in_pixels - 2 * gap_size;
+            int master_width = (usable_width * master_ratio) - (gap_size / 2);
+            int stack_width = usable_width - master_width - gap_size;
+            int stack_count = tilling_windows.size() - 1;
+
+            uint32_t master_geom[4] = {
+                gap_size,
+                gap_size,
+                (uint32_t)master_width,
+                (uint32_t)usable_height
+            };
+            xcb_configure_window(connection, master,
+                XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                master_geom);
+
+            for (size_t i = 1; i < tilling_windows.size(); ++i) {
+                int stack_height_per_window = (usable_height - (stack_count - 1) * gap_size) / stack_count;
+                int stack_y = gap_size + (i-1) * (stack_height_per_window + gap_size);
+                uint32_t stack_geom[4] = {
+                    gap_size + master_width + gap_size,
+                    (uint32_t)stack_y,
+                    (uint32_t)stack_width,
+                    (uint32_t)stack_height_per_window
+                };
+                xcb_configure_window(connection, tilling_windows[i],
+                    XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                    stack_geom);
+
+            }
+        }
     }
-    /*for (xcb_window_t tilled_window : tilling_windows) {
-        uint32_t values[] = {XCB_STACK_MODE_BELOW};
-        xcb_configure_window(connection, tilled_window, XCB_CONFIG_WINDOW_STACK_MODE, values);
-    } */
-    xcb_window_t master = tilling_windows[0];
-    int usable_width = screen->width_in_pixels - 2 * gap_size;
-    int usable_height = screen->height_in_pixels - 2 * gap_size;
-    int master_width = (usable_width * master_ratio) - (gap_size / 2);
-    int stack_width = usable_width - master_width - gap_size;
-    int stack_count = tilling_windows.size() - 1;
 
-    uint32_t master_geom[4] = {
-        gap_size,
-        gap_size,
-        (uint32_t)master_width,
-        (uint32_t)usable_height
-    };
-    xcb_configure_window(connection, master,
-        XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-        master_geom);
-
-    for (size_t i = 1; i < tilling_windows.size(); ++i) {
-        int stack_height_per_window = (usable_height - (stack_count - 1) * gap_size) / stack_count;
-        int stack_y = gap_size + (i-1) * (stack_height_per_window + gap_size);
-        uint32_t stack_geom[4] = {
-            gap_size + master_width + gap_size,
-            (uint32_t)stack_y,
-            (uint32_t)stack_width,
-            (uint32_t)stack_height_per_window
-        };
-        xcb_configure_window(connection, tilling_windows[i],
-            XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-            stack_geom);
-
-    }
     for (xcb_window_t floating_window : floating_windows) {
         uint32_t values[] = { XCB_STACK_MODE_ABOVE };
         xcb_configure_window(connection, floating_window, XCB_CONFIG_WINDOW_STACK_MODE, values);
