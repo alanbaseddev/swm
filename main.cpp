@@ -290,6 +290,29 @@ void toggle_floating(xcb_connection_t* conn, xcb_screen_t* screen, xcb_window_t 
     xcb_flush(conn);
 }
 
+void move_window_in_stack(xcb_connection_t* conn, xcb_screen_t* screen, bool move_up) {
+    auto& current_windows = get_current_windows();
+    xcb_window_t focused = get_current_focused();
+    if ( focused == XCB_WINDOW_NONE || current_windows.empty() ) return;
+    if (is_floating(focused)) return;
+    auto it = std::find(current_windows.begin(), current_windows.end(), focused);
+    if (it == current_windows.end()) return;
+    size_t current_pos = std::distance(current_windows.begin(), it);
+    size_t new_pos;
+    if (move_up) {
+        if (current_pos == 0) {
+            new_pos = current_windows.size() - 1;
+        } else {
+            new_pos = current_pos - 1;
+        }
+    } else {
+        new_pos = (current_pos + 1) % current_windows.size();
+    }
+    std::swap(current_windows[current_pos], current_windows[new_pos]);
+    apply_master_stack(conn, screen);
+    focus_client(conn, focused);
+}
+
 void get_window_geometry(xcb_connection_t* conn, xcb_window_t window, int* x, int* y, int* width, int* height) {
     xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(conn, window);
     xcb_get_geometry_reply_t* geom_reply = xcb_get_geometry_reply(conn, geom_cookie, nullptr);
@@ -463,6 +486,8 @@ int main() {
         grab_key_with_mods(KEYCODE_7, modmask_super);
         grab_key_with_mods(KEYCODE_8, modmask_super);
         grab_key_with_mods(KEYCODE_9, modmask_super);
+        grab_key_with_mods(KEYCODE_J, modmask_super | XCB_MOD_MASK_SHIFT);
+        grab_key_with_mods(KEYCODE_K, modmask_super | XCB_MOD_MASK_SHIFT);
         grab_key_with_mods(KEYCODE_1, modmask_super | XCB_MOD_MASK_SHIFT);
         grab_key_with_mods(KEYCODE_2, modmask_super | XCB_MOD_MASK_SHIFT);
         grab_key_with_mods(KEYCODE_3, modmask_super | XCB_MOD_MASK_SHIFT);
@@ -630,6 +655,14 @@ int main() {
                         if (focused_client_window != XCB_WINDOW_NONE && focused_client_window != screen->root) {
                             kill_client(connection, focused_client_window);
                         }
+                    }
+                    else if ((kp->detail == KEYCODE_J) && (current_modmask & modmask_super) && (current_modmask & XCB_MOD_MASK_SHIFT)) {
+                        std::cout << "Move window down" << std::endl;
+                        move_window_in_stack(connection, screen, false);
+                    }
+                    else if ((kp->detail == KEYCODE_K) && (current_modmask & modmask_super) && (current_modmask & XCB_MOD_MASK_SHIFT)) {
+                        std::cout << "Move window up" << std::endl;
+                        move_window_in_stack(connection, screen, true);
                     }
                     else if ((kp->detail == KEYCODE_J && (current_modmask & modmask_super))) {
                         auto& current_windows = get_current_windows();
