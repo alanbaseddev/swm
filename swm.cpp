@@ -6,6 +6,7 @@
 #include <oneapi/tbb/profiling.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
+#include <xcb/xcb_ewmh.h>
 
 constexpr xcb_keycode_t KEYCODE_RETURN = 36;
 constexpr xcb_keycode_t KEYCODE_ESCAPE = 9;
@@ -37,6 +38,25 @@ xcb_window_t focused_client_window = XCB_WINDOW_NONE;
 std::vector<xcb_window_t> client_windows;
 uint32_t focused_border;
 uint32_t unfocused_border;
+xcb_screen_t* screen = nullptr;
+
+struct EwmhAtoms {
+    xcb_atom_t _NET_SUPPORTED;
+    xcb_atom_t _NET_NUMBER_OF_DESKTOPS;
+    xcb_atom_t _NET_CURRENT_DESKTOP;
+    xcb_atom_t _NET_ACTIVE_WINDOW;
+    xcb_atom_t _NET_WM_STATE;
+    xcb_atom_t _NET_WM_STATE_FULLSCREEN;
+    xcb_atom_t _NET_WM_WINDOW_TYPE;
+    xcb_atom_t _NET_WM_WINDOW_TYPE_DIALOG;
+    xcb_atom_t _NET_CLIENT_LIST;
+    xcb_atom_t _NET_CLIENT_LIST_STACKING;
+    xcb_atom_t _NET_WM_DESKTOP;
+    xcb_atom_t _NET_WM_NAME;
+    xcb_atom_t _NET_DESKTOP_NAMES;
+    xcb_atom_t _NET_WORKAREA;
+} ewmh;
+
 
 struct DragState {
     bool is_dragging = false;
@@ -53,6 +73,18 @@ struct Workspaces {
 };
 std::array<Workspaces, MAX_WORKSPACES> workspaces;
 int current_workspace = 0;
+
+xcb_atom_t get_atom(xcb_connection_t* conn, const char* name) {
+    xcb_intern_atom_cookie_t cookie = xcb_intern_atom(conn, 0, strlen(name), name);
+    xcb_intern_atom_reply_t* reply = xcb_intern_atom_reply(conn, cookie, nullptr);
+    if (!reply) {
+        std::cerr << "Could not get atom: " << name << std::endl;
+        return XCB_ATOM_NONE;
+    }
+    xcb_atom_t atom = reply->atom;
+    free(reply);
+    return atom;
+}
 
 std::vector<xcb_window_t>& get_current_windows() {
     return workspaces[current_workspace].windows;
@@ -108,8 +140,27 @@ void focus_client(xcb_connection_t* conn, xcb_window_t window_id) {
         focused_client_window = window_id;
         xcb_set_input_focus(conn, XCB_INPUT_FOCUS_POINTER_ROOT, window_id, XCB_CURRENT_TIME);
         xcb_circulate_window(conn, XCB_CIRCULATE_RAISE_LOWEST, window_id);
+        xcb_change_property(
+            conn,
+            XCB_PROP_MODE_REPLACE,
+            screen->root,
+            ewmh._NET_ACTIVE_WINDOW,
+            XCB_ATOM_WINDOW,
+            32,
+            1,
+            &window_id);
     } else {
         focused_client_window = XCB_WINDOW_NONE;
+        xcb_change_property(
+            conn,
+            XCB_PROP_MODE_REPLACE,
+            screen->root,
+            ewmh._NET_ACTIVE_WINDOW,
+            XCB_ATOM_WINDOW,
+            32,
+            1,
+            &window_id // window_id to XCB_WINDOW_NONE
+        );
     }
 
     xcb_flush(conn);
@@ -242,7 +293,20 @@ void switch_workspace(xcb_connection_t* conn, xcb_screen_t* screen, int new_work
     } else {
         focused_client_window = XCB_WINDOW_NONE;
     }
+    xcb_change_property(
+        conn,
+        XCB_PROP_MODE_REPLACE,
+        screen->root,
+        ewmh._NET_CURRENT_DESKTOP,
+        XCB_ATOM_CARDINAL,
+        32,
+        1,
+        &current_workspace
+    );
+    xcb_flush(conn);
 }
+
+void update_client_list(xcb_connection_t * conn, xcb_screen_t * screen);
 
 void move_window_to_workspace(xcb_connection_t* conn, xcb_screen_t* screen, xcb_window_t window, int target_workspace) {
     if (target_workspace < 0 || target_workspace >= MAX_WORKSPACES || target_workspace == current_workspace) {
@@ -253,7 +317,18 @@ void move_window_to_workspace(xcb_connection_t* conn, xcb_screen_t* screen, xcb_
     if (it != current_windows.end()) {
         current_windows.erase(it);
         workspaces[target_workspace].windows.push_back(window);
+        xcb_change_property(
+            conn,
+            XCB_PROP_MODE_REPLACE,
+            window,
+            ewmh._NET_WM_DESKTOP,
+            XCB_ATOM_CARDINAL,
+            32,
+            1,
+            &target_workspace
+        );
         xcb_unmap_window(conn, window);
+
         if (get_current_focused() == window) {
             if (!current_windows.empty()) {
                 focus_client(conn, current_windows.back());
@@ -262,6 +337,7 @@ void move_window_to_workspace(xcb_connection_t* conn, xcb_screen_t* screen, xcb_
                 focused_client_window = XCB_WINDOW_NONE;
             }
         }
+        update_client_list(conn, screen);
         apply_master_stack(conn, screen);
         xcb_flush(conn);
     }
@@ -397,9 +473,36 @@ void end_drag(xcb_connection_t* conn) {
     xcb_flush(conn);
 }
 
+void update_client_list(xcb_connection_t* conn, xcb_screen_t* screen) {
+    std::vector<xcb_window_t> all_windows;
+    for (int i = 0; i < MAX_WORKSPACES; ++i) {
+        all_windows.insert(all_windows.end(), workspaces[i].windows.begin(), workspaces[i].windows.end());
+    }
+    xcb_change_property(
+        conn,
+        XCB_PROP_MODE_REPLACE,
+        screen->root,
+        ewmh._NET_CLIENT_LIST,
+        XCB_ATOM_WINDOW,
+        32,
+        all_windows.size(),
+        all_windows.data()
+    );
+    xcb_change_property(
+        conn,
+        XCB_PROP_MODE_REPLACE,
+        screen->root,
+        ewmh._NET_CLIENT_LIST_STACKING,
+        XCB_ATOM_WINDOW,
+        32,
+        all_windows.size(),
+        all_windows.data()
+    );
+}
+
+
 int main() {
     xcb_connection_t* connection;
-    xcb_screen_t* screen;
     xcb_generic_event_t* event = nullptr;
 
     connection = xcb_connect(nullptr, nullptr);
@@ -411,6 +514,76 @@ int main() {
 
     const xcb_setup_t* setup = xcb_get_setup(connection);
     screen = xcb_setup_roots_iterator(setup).data;
+    // initializing EWMH atoms
+    ewmh._NET_SUPPORTED = get_atom(connection, "_NET_SUPPORTED");
+    ewmh._NET_NUMBER_OF_DESKTOPS = get_atom(connection, "_NET_NUMBER_OF_DESKTOPS");
+    ewmh._NET_CURRENT_DESKTOP = get_atom(connection, "_NET_CURRENT_DESKTOP");
+    ewmh._NET_ACTIVE_WINDOW = get_atom(connection, "_NET_ACTIVE_WINDOW");
+    ewmh._NET_WM_STATE = get_atom(connection, "_NET_WM_STATE");
+    ewmh._NET_WM_STATE_FULLSCREEN = get_atom(connection, "_NET_WM_STATE_FULLSCREEN");
+    ewmh._NET_WM_WINDOW_TYPE = get_atom(connection, "_NET_WM_WINDOW_TYPE");
+    ewmh._NET_WM_WINDOW_TYPE_DIALOG = get_atom(connection, "_NET_WM_WINDOW_TYPE_DIALOG");
+    ewmh._NET_CLIENT_LIST = get_atom(connection, "_NET_CLIENT_LIST");
+    ewmh._NET_CLIENT_LIST_STACKING = get_atom(connection, "_NET_CLIENT_LIST_STACKING");
+    ewmh._NET_WM_DESKTOP = get_atom(connection, "_NET_WM_DESKTOP");
+    ewmh._NET_WM_NAME = get_atom(connection, "_NET_WM_NAME");
+    ewmh._NET_DESKTOP_NAMES = get_atom(connection, "_NET_DESKTOP_NAMES");
+    ewmh._NET_WORKAREA = get_atom(connection, "_NET_WORKAREA");
+    std::vector<xcb_atom_t> supported_atoms = {
+        ewmh._NET_SUPPORTED,
+        ewmh._NET_NUMBER_OF_DESKTOPS,
+        ewmh._NET_CURRENT_DESKTOP,
+        ewmh._NET_ACTIVE_WINDOW,
+        ewmh._NET_WM_STATE,
+        ewmh._NET_WM_STATE_FULLSCREEN,
+        ewmh._NET_WM_WINDOW_TYPE,
+        ewmh._NET_WM_WINDOW_TYPE_DIALOG,
+        ewmh._NET_CLIENT_LIST,
+        ewmh._NET_CLIENT_LIST_STACKING,
+        ewmh._NET_WM_DESKTOP,
+        ewmh._NET_WM_NAME,
+        ewmh._NET_DESKTOP_NAMES,
+        ewmh._NET_WORKAREA
+    };
+    xcb_change_property(
+        connection,
+        XCB_PROP_MODE_REPLACE,
+        screen->root,
+        ewmh._NET_SUPPORTED,
+        XCB_ATOM_ATOM,
+        32,
+        supported_atoms.size(),
+        supported_atoms.data()
+    );
+    uint32_t num_desktops = MAX_WORKSPACES;
+    xcb_change_property(
+        connection,
+        XCB_PROP_MODE_REPLACE,
+        screen->root,
+        ewmh._NET_NUMBER_OF_DESKTOPS,
+        XCB_ATOM_CARDINAL,
+        32,
+        1,
+        &num_desktops
+    );
+    uint32_t workarea[4] = {
+        (uint32_t)gap_size,
+        (uint32_t)gap_size,
+        (uint32_t)(screen->width_in_pixels - 2 * gap_size),
+        (uint32_t)(screen->height_in_pixels - 2 * gap_size)
+    };
+    xcb_change_property(
+        connection,
+        XCB_PROP_MODE_REPLACE,
+        screen->root,
+        ewmh._NET_WORKAREA,
+        XCB_ATOM_CARDINAL,
+        32,
+        4,
+        workarea
+    );
+    update_client_list(connection, screen);
+
     focused_border = get_color_pixel(connection, screen, 65535, 42405, 0);
     unfocused_border = get_color_pixel(connection, screen, 30000, 30000, 30000);
 
@@ -508,6 +681,15 @@ int main() {
             switch (event->response_type & ~0x80) {
                 case XCB_MAP_REQUEST: {
                     auto* mr = (xcb_map_request_event_t*)event;
+                    xcb_get_window_attributes_cookie_t attr_cookie = xcb_get_window_attributes(connection, mr->window);
+                    xcb_get_window_attributes_reply_t* attr_reply = xcb_get_window_attributes_reply(connection, attr_cookie, nullptr);
+                    if (attr_reply && attr_reply->override_redirect) {
+                        free(attr_reply);
+                        xcb_map_window(connection, mr->window);
+                        xcb_flush(connection);
+                        break;
+                    }
+                    if (attr_reply) free(attr_reply);
                     uint32_t values[4];
                     uint16_t mask_config = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
                     values[0] = 0;
@@ -551,6 +733,17 @@ int main() {
                     get_current_windows().push_back(mr->window);
                     apply_master_stack(connection, screen);
 
+                    xcb_change_property(
+                        connection,
+                        XCB_PROP_MODE_REPLACE,
+                        mr->window,
+                        ewmh._NET_WM_DESKTOP,
+                        XCB_ATOM_CARDINAL,
+                        32,
+                        1,
+                        &current_workspace
+                    );
+                    update_client_list(connection, screen);
                     focus_client(connection, mr->window);
                     break;
                 }
@@ -616,6 +809,7 @@ int main() {
                         floating_windows.erase(float_it);
                     }
                     if (found) {
+                        update_client_list(connection, screen);
                         apply_master_stack(connection, screen);
                     }
                     break;
@@ -817,6 +1011,33 @@ int main() {
 
                     if (is_client && fi->event != focused_client_window) {
                         focused_client_window = fi->event;
+                    }
+                    break;
+                }
+
+                case XCB_CLIENT_MESSAGE: {
+                    auto* cm = (xcb_client_message_event_t*)event;
+
+                    if (cm->type == ewmh._NET_CURRENT_DESKTOP) {
+                        uint32_t new_desktop = cm->data.data32[0];
+                        if (new_desktop < MAX_WORKSPACES) {
+                            switch_workspace(connection, screen, new_desktop);
+                        }
+                    }
+                    else if (cm->type == ewmh._NET_ACTIVE_WINDOW) {
+                        xcb_window_t win = cm->window;
+                        // Find and focus this window
+                        for (int i = 0; i < MAX_WORKSPACES; ++i) {
+                            auto it = std::find(workspaces[i].windows.begin(),
+                                              workspaces[i].windows.end(), win);
+                            if (it != workspaces[i].windows.end()) {
+                                if (i != current_workspace) {
+                                    switch_workspace(connection, screen, i);
+                                }
+                                focus_client(connection, win);
+                                break;
+                            }
+                        }
                     }
                     break;
                 }
